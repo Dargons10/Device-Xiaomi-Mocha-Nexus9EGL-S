@@ -25,93 +25,93 @@
 #include "sysfs.h"
 
 namespace android {
-namespace hardware {
-namespace power {
-namespace V1_0 {
-namespace implementation {
+    namespace hardware {
+        namespace power {
+            namespace V1_0 {
+                namespace implementation {
 
-using ::android::hardware::power::V1_0::Feature;
-using ::android::hardware::power::V1_0::PowerHint;
-using ::android::hardware::power::V1_0::PowerStatePlatformSleepState;
-using ::android::hardware::power::V1_0::Status;
-using ::android::hardware::hidl_vec;
-using ::android::hardware::Return;
-using ::android::hardware::Void;
+                    using ::android::hardware::power::V1_0::Feature;
+                    using ::android::hardware::power::V1_0::PowerHint;
+                    using ::android::hardware::power::V1_0::PowerStatePlatformSleepState;
+                    using ::android::hardware::power::V1_0::Status;
+                    using ::android::hardware::hidl_vec;
+                    using ::android::hardware::Return;
+                    using ::android::hardware::Void;
 
-static const std::string TAP_TO_WAKE_NODE = "/proc/touchpanel/double_tap_enable";
-static const std::string POWER_PROFILE_PROPERTY = "sys.perf.profile";
-static const int PROFILE_MAX = 4;
+                    static const std::string TAP_TO_WAKE_NODE = "/proc/touchpanel/double_tap_enable";
+                    static const std::string POWER_PROFILE_PROPERTY = "sys.perf.profile";
+                    static const int PROFILE_MAX = 4;
 
-const static power_hint_t POWER_HINT_SET_PROFILE = (power_hint_t)0x00000111;
+                    const static power_hint_t POWER_HINT_SET_PROFILE = (power_hint_t)0x00000111;
 
-Power::Power() {
-    ALOGI("power_init\n");
-}
+                    Power::Power() {
+                        ALOGI("power_init\n");
+                    }
 
-// Methods from ::android::hardware::power::V1_0::IPower follow.
-Return<void> Power::setInteractive(bool /*interactive*/)  {
-    ALOGI("power_set_interactive\n");
-    return Void();
-}
+                    // Methods from ::android::hardware::power::V1_0::IPower follow.
+                    Return<void> Power::setInteractive(bool /*interactive*/)  {
+                        ALOGI("power_set_interactive\n");
+                        return Void();
+                    }
 
-Return<void> Power::powerHint(PowerHint hint, int32_t data) {
-    if (static_cast<power_hint_t>(hint) == POWER_HINT_SET_PROFILE) {
-        std::string value = std::to_string(data);
-        property_set(POWER_PROFILE_PROPERTY.c_str(), value.c_str());
-        ALOGI("set power profile = %d", data);
-    }
-    return Void();
-}
+                    Return<void> Power::powerHint(PowerHint hint, int32_t data) {
+                        if (static_cast<power_hint_t>(hint) == POWER_HINT_SET_PROFILE) {
+                            std::string value = std::to_string(data);
+                            property_set(POWER_PROFILE_PROPERTY.c_str(), value.c_str());
+                            ALOGI("set power profile = %d", data);
+                        }
+                        return Void();
+                    }
 
-Return<void> Power::setFeature(Feature feature, bool activate)  {
-    if (feature == Feature::POWER_FEATURE_DOUBLE_TAP_TO_WAKE) {
-        ALOGI("POWER_FEATURE_DOUBLE_TAP_TO_WAKE activate = %d\n", activate);
-        std::string data = std::to_string(activate);
-        utils::sysfs_write(TAP_TO_WAKE_NODE, data);
-    }
-    return Void();
-}
+                    Return<void> Power::setFeature(Feature feature, bool activate)  {
+                        if (feature == Feature::POWER_FEATURE_DOUBLE_TAP_TO_WAKE) {
+                            ALOGI("POWER_FEATURE_DOUBLE_TAP_TO_WAKE activate = %d\n", activate);
+                            std::string data = std::to_string(activate);
+                            utils::sysfs_write(TAP_TO_WAKE_NODE, data);
+                        }
+                        return Void();
+                    }
 
-Return<void> Power::getPlatformLowPowerStats(getPlatformLowPowerStats_cb _hidl_cb) {
-    hidl_vec<PowerStatePlatformSleepState> states;
-    states.resize(0);
-    _hidl_cb(states, Status::SUCCESS);
-    return Void();
-}
+                    Return<void> Power::getPlatformLowPowerStats(getPlatformLowPowerStats_cb _hidl_cb) {
+                        hidl_vec<PowerStatePlatformSleepState> states;
+                        states.resize(0);
+                        _hidl_cb(states, Status::SUCCESS);
+                        return Void();
+                    }
 
-Return<int32_t> Power::getFeature(LineageFeature feature)  {
-    if (feature == LineageFeature::SUPPORTED_PROFILES) {
-        ALOGI("power profiles POWER_FEATURE_SUPPORTED_PROFILES\n");
-        return PROFILE_MAX;
-    }
-    return -1;
-}
+                    Return<int32_t> Power::getFeature(LineageFeature feature)  {
+                        if (feature == LineageFeature::SUPPORTED_PROFILES) {
+                            ALOGI("power profiles POWER_FEATURE_SUPPORTED_PROFILES\n");
+                            return PROFILE_MAX;
+                        }
+                        return -1;
+                    }
 
-status_t Power::registerAsSystemService() {
-    status_t ret = 0;
+                    status_t Power::registerAsSystemService() {
+                        status_t ret = 0;
 
-    ret = IPower::registerAsService();
-    if (ret != 0) {
-        ALOGE("Failed to register IPower (%d)", ret);
-        goto fail;
-    } else {
-        ALOGI("Successfully registered IPower");
-    }
+                        ret = IPower::registerAsService();
+                        if (ret != 0) {
+                            ALOGE("Failed to register IPower (%d)", ret);
+                            goto fail;
+                        } else {
+                            ALOGI("Successfully registered IPower");
+                        }
 
-    ret = ILineagePower::registerAsService();
-    if (ret != 0) {
-        ALOGE("Failed to register ILineagePower (%d)", ret);
-        goto fail;
-    } else {
-        ALOGI("Successfully registered ILineagePower");
-    }
+                        ret = ILineagePower::registerAsService();
+                        if (ret != 0) {
+                            ALOGE("Failed to register ILineagePower (%d)", ret);
+                            goto fail;
+                        } else {
+                            ALOGI("Successfully registered ILineagePower");
+                        }
 
-fail:
-    return ret;
-}
+                        fail:
+                        return ret;
+                    }
 
-}  // namespace implementation
-}  // namespace V1_0
-}  // namespace power
-}  // namespace hardware
+                }  // namespace implementation
+            }  // namespace V1_0
+        }  // namespace power
+    }  // namespace hardware
 }  // namespace android
