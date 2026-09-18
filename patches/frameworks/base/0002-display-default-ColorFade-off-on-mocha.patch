@@ -21,12 +21,12 @@ Signed-off-by: Opencode <opencode.ai>
  1 file changed, 7 insertions(+), 1 deletion(-)
 
 diff --git a/services/core/java/com/android/server/display/DisplayPowerController.java b/services/core/java/com/android/server/display/DisplayPowerController.java
-index f77f0e302aa..d684adbc851 100644
+index d590ae8fa6d0..b9283169ddc1 100644
 --- a/services/core/java/com/android/server/display/DisplayPowerController.java
 +++ b/services/core/java/com/android/server/display/DisplayPowerController.java
-@@ -533,7 +533,13 @@ final class DisplayPowerController implements AutomaticBrightnessController.Call
-             }
-         }
+@@ -531,7 +531,13 @@ final class DisplayPowerController implements AutomaticBrightnessController.Call
+ 
+         setUpAutoBrightness(resources, handler);
  
 -        mColorFadeEnabled = !ActivityManager.isLowRamDeviceStatic();
 +        /* Tegra124 (mocha): the ColorFade surface stalls on the EGL blob at
@@ -39,6 +39,3 @@ index f77f0e302aa..d684adbc851 100644
          mColorFadeFadesConfig = resources.getBoolean(
                  com.android.internal.R.bool.config_animateScreenLights);
  
--- 
-2.47.3
-
