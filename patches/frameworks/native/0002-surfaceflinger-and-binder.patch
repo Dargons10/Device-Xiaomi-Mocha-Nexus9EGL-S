@@ -1,8 +1,8 @@
 diff --git a/libs/binder/include/binder/IInterface.h b/libs/binder/include/binder/IInterface.h
-index 711615495..463e31ce5 100644
+index ff90b30380..82786c4abd 100644
 --- a/libs/binder/include/binder/IInterface.h
 +++ b/libs/binder/include/binder/IInterface.h
-@@ -313,6 +313,15 @@ constexpr const char* const kManualInterfaces[] = {
+@@ -297,6 +297,15 @@ constexpr const char* const kManualInterfaces[] = {
  
  constexpr const char* const kDownstreamManualInterfaces[] = {
    // Add downstream interfaces here.
@@ -19,10 +19,10 @@ index 711615495..463e31ce5 100644
  };
  
 diff --git a/services/surfaceflinger/SurfaceFlinger.cpp b/services/surfaceflinger/SurfaceFlinger.cpp
-index 878761b07..fa66ed5bd 100644
+index 0a2f002ab7..e69d090b88 100644
 --- a/services/surfaceflinger/SurfaceFlinger.cpp
 +++ b/services/surfaceflinger/SurfaceFlinger.cpp
-@@ -347,6 +347,11 @@ SurfaceFlinger::SurfaceFlinger(Factory& factory) : SurfaceFlinger(factory, SkipI
+@@ -403,6 +403,11 @@ SurfaceFlinger::SurfaceFlinger(Factory& factory) : SurfaceFlinger(factory, SkipI
      maxGraphicsWidth = std::max(max_graphics_width(0), 0);
      maxGraphicsHeight = std::max(max_graphics_height(0), 0);
  
@@ -33,4 +33,4 @@ index 878761b07..fa66ed5bd 100644
 +
      hasWideColorDisplay = has_wide_color_display(false);
  
-     useColorManagement = use_color_management(false);
+     // Android 12 and beyond, color management in display pipeline is turned on
