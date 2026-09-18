@@ -1,17 +1,25 @@
 diff --git a/media/codec2/components/aac/C2SoftAacDec.cpp b/media/codec2/components/aac/C2SoftAacDec.cpp
-index 677f31643a..4bc2f42ccc 100644
+index 57cdcd0a9d..e74e8eef0c 100644
 --- a/media/codec2/components/aac/C2SoftAacDec.cpp
 +++ b/media/codec2/components/aac/C2SoftAacDec.cpp
-@@ -54,7 +54,7 @@
+@@ -23,6 +23,7 @@
+ #include <numeric>
+ 
+ #include <cutils/properties.h>
++#include <system/time.h>
+ #include <media/stagefright/foundation/MediaDefs.h>
+ #include <media/stagefright/foundation/hexdump.h>
+ #include <media/stagefright/MediaErrors.h>
+@@ -54,7 +55,7 @@
  
  namespace android {
  
 -constexpr char COMPONENT_NAME[] = "c2.android.aac.decoder";
 +constexpr char COMPONENT_NAME[] = "c2.android.aac.decoder.fdk.disabled";
+ constexpr size_t kDefaultOutputPortDelay = 2;
+ constexpr size_t kMaxOutputPortDelay = 16;
  
- class C2SoftAacDec::IntfImpl : public SimpleInterface<void>::BaseParams {
- public:
-@@ -550,6 +550,7 @@ void C2SoftAacDec::drainRingBuffer(
+@@ -554,6 +555,7 @@ void C2SoftAacDec::drainRingBuffer(
  void C2SoftAacDec::process(
          const std::unique_ptr<C2Work> &work,
          const std::shared_ptr<C2BlockPool> &pool) {
@@ -19,7 +27,7 @@ index 677f31643a..4bc2f42ccc 100644
      // Initialize output work
      work->result = C2_OK;
      work->workletsProcessed = 1u;
-@@ -569,12 +570,15 @@ void C2SoftAacDec::process(
+@@ -573,12 +575,15 @@ void C2SoftAacDec::process(
      size_t offset = 0u;
      size_t size = 0u;
      if (!work->input.buffers.empty()) {
@@ -35,7 +43,7 @@ index 677f31643a..4bc2f42ccc 100644
  
      //TODO
  #if 0
-@@ -610,8 +614,22 @@ void C2SoftAacDec::process(
+@@ -614,8 +619,22 @@ void C2SoftAacDec::process(
      inInfo.timestamp = work->input.ordinal.timestamp.peeku();
      inInfo.bufferSize = size;
      inInfo.decodedSizes.clear();
@@ -59,7 +67,7 @@ index 677f31643a..4bc2f42ccc 100644
          if (mIntf->isAdts()) {
              size_t adtsHeaderSize = 0;
              // skip 30 bits, aac_frame_length follows.
-@@ -673,10 +691,15 @@ void C2SoftAacDec::process(
+@@ -677,10 +696,15 @@ void C2SoftAacDec::process(
          INT prevNumChannels = mStreamInfo->numChannels;
          INT prevOutLoudness = mStreamInfo->outputLoudness;
  
@@ -79,7 +87,7 @@ index 677f31643a..4bc2f42ccc 100644
  
          // run DRC check
          mDrcWrap.submitStreamData(mStreamInfo);
-@@ -727,6 +750,12 @@ void C2SoftAacDec::process(
+@@ -731,6 +755,12 @@ void C2SoftAacDec::process(
          UINT inBufferUsedLength = inBufferLength[0] - bytesValid[0];
          size -= inBufferUsedLength;
          offset += inBufferUsedLength;
@@ -92,7 +100,7 @@ index 677f31643a..4bc2f42ccc 100644
  
          AAC_DECODER_ERROR decoderErr;
          do {
-@@ -739,10 +768,15 @@ void C2SoftAacDec::process(
+@@ -743,10 +773,15 @@ void C2SoftAacDec::process(
              }
  
              int numConsumed = mStreamInfo->numTotalBytes;
@@ -112,7 +120,7 @@ index 677f31643a..4bc2f42ccc 100644
  
              numConsumed = mStreamInfo->numTotalBytes - numConsumed;
  
-@@ -908,6 +942,10 @@ void C2SoftAacDec::process(
+@@ -916,6 +951,10 @@ void C2SoftAacDec::process(
  
          } while (decoderErr == AAC_DEC_OK);
      }
@@ -123,7 +131,7 @@ index 677f31643a..4bc2f42ccc 100644
  
      int32_t outputDelay = mStreamInfo->outputDelay * mStreamInfo->numChannels;
  
-@@ -930,6 +968,10 @@ void C2SoftAacDec::process(
+@@ -961,6 +1000,10 @@ void C2SoftAacDec::process(
      } else {
          drainRingBuffer(work, pool, false /* not EOS */);
      }
@@ -135,10 +143,10 @@ index 677f31643a..4bc2f42ccc 100644
  
  c2_status_t C2SoftAacDec::drainInternal(
 diff --git a/media/codec2/components/avc/C2SoftAvcDec.cpp b/media/codec2/components/avc/C2SoftAvcDec.cpp
-index d7b9e12ce7..608a6f2322 100644
+index e8287f9344..7fb5e692ca 100644
 --- a/media/codec2/components/avc/C2SoftAvcDec.cpp
 +++ b/media/codec2/components/avc/C2SoftAvcDec.cpp
-@@ -336,6 +336,8 @@ C2SoftAvcDec::C2SoftAvcDec(
+@@ -339,6 +339,8 @@ C2SoftAvcDec::C2SoftAvcDec(
        mIntf(intfImpl),
        mDecHandle(nullptr),
        mOutBufferFlush(nullptr),
@@ -147,7 +155,7 @@ index d7b9e12ce7..608a6f2322 100644
        mIvColorFormat(IV_YUV_420P),
        mOutputDelay(kDefaultOutputDelay),
        mWidth(320),
-@@ -371,6 +373,11 @@ void C2SoftAvcDec::onRelease() {
+@@ -374,6 +376,11 @@ void C2SoftAvcDec::onRelease() {
          ivd_aligned_free(nullptr, mOutBufferFlush);
          mOutBufferFlush = nullptr;
      }
@@ -159,88 +167,40 @@ index d7b9e12ce7..608a6f2322 100644
      if (mOutBlock) {
          mOutBlock.reset();
      }
-@@ -519,20 +526,19 @@ bool C2SoftAvcDec::setDecodeArgs(ivd_video_decode_ip_t *ps_decode_ip,
-                                  size_t inOffset,
-                                  size_t inSize,
+@@ -530,9 +537,8 @@ bool C2SoftAvcDec::setDecodeArgs(ivd_video_decode_ip_t *ps_decode_ip,
                                   uint32_t tsMarker) {
--    uint32_t displayStride = mStride;
--    if (outBuffer) {
+     uint32_t displayStride = mStride;
+     if (outBuffer) {
 -        C2PlanarLayout layout;
 -        layout = outBuffer->layout();
 -        displayStride = layout.planes[C2PlanarLayout::PLANE_Y].rowInc;
--    }
--    uint32_t displayHeight = mHeight;
--    size_t lumaSize = displayStride * displayHeight;
--    size_t chromaSize = lumaSize >> 2;
--
--    if (mStride != displayStride) {
--        mStride = displayStride;
--        if (OK != setParams(mStride, IVD_DECODE_FRAME)) return false;
--    }
-+     uint32_t displayStride = mStride;
-+     if (outBuffer) {
-+         // Decode into the CPU YV12 buffer (Tegra gralloc cannot allocate YUV buffers).
-+         displayStride = ALIGN32(mWidth);
-+     }
-+     uint32_t displayHeight = mHeight;
-+     size_t lumaSize = displayStride * displayHeight;
-+     size_t chromaSize = lumaSize >> 2;
-+
-+     if (mStride != displayStride) {
-+         mStride = displayStride;
-+         if (OK != setParams(mStride, IVD_DECODE_FRAME)) return false;
-+     }
- 
-     ps_decode_ip->u4_size = sizeof(ivd_video_decode_ip_t);
-     ps_decode_ip->e_cmd = IVD_CMD_VIDEO_DECODE;
-@@ -548,23 +554,32 @@ bool C2SoftAvcDec::setDecodeArgs(ivd_video_decode_ip_t *ps_decode_ip,
-     ps_decode_ip->s_out_buffer.u4_min_out_buf_size[0] = lumaSize;
++        // Decode into the CPU YV12 buffer (Tegra gralloc cannot allocate YUV buffers).
++        displayStride = ALIGN32(mWidth);
+     }
+     uint32_t displayHeight = mHeight;
+     size_t lumaSize = displayStride * displayHeight;
+@@ -558,14 +564,14 @@ bool C2SoftAvcDec::setDecodeArgs(ivd_video_decode_ip_t *ps_decode_ip,
      ps_decode_ip->s_out_buffer.u4_min_out_buf_size[1] = chromaSize;
      ps_decode_ip->s_out_buffer.u4_min_out_buf_size[2] = chromaSize;
--    if (outBuffer) {
+     if (outBuffer) {
 -        if (outBuffer->height() < displayHeight) {
 -            ALOGE("Output buffer too small: provided (%dx%d) required (%ux%u)",
 -                  outBuffer->width(), outBuffer->height(), displayStride, displayHeight);
--            return false;
--        }
++        if (mYuvCpuBuffer) {
++            ps_decode_ip->s_out_buffer.pu1_bufs[0] = mYuvCpuBuffer;
++            ps_decode_ip->s_out_buffer.pu1_bufs[1] = mYuvCpuBuffer + lumaSize;
++            ps_decode_ip->s_out_buffer.pu1_bufs[2] = mYuvCpuBuffer + lumaSize + chromaSize;
++        } else {
++            ALOGE("CPU YV12 buffer not allocated (stride=%u height=%u)", displayStride, displayHeight);
+             return false;
+         }
 -        ps_decode_ip->s_out_buffer.pu1_bufs[0] = outBuffer->data()[C2PlanarLayout::PLANE_Y];
 -        ps_decode_ip->s_out_buffer.pu1_bufs[1] = outBuffer->data()[C2PlanarLayout::PLANE_U];
 -        ps_decode_ip->s_out_buffer.pu1_bufs[2] = outBuffer->data()[C2PlanarLayout::PLANE_V];
--    } else {
--        ps_decode_ip->s_out_buffer.pu1_bufs[0] = mOutBufferFlush;
--        ps_decode_ip->s_out_buffer.pu1_bufs[1] = mOutBufferFlush + lumaSize;
--        ps_decode_ip->s_out_buffer.pu1_bufs[2] = mOutBufferFlush + lumaSize + chromaSize;
--    }
-+     if (outBuffer) {
-+         if (mYuvCpuBuffer) {
-+             ps_decode_ip->s_out_buffer.pu1_bufs[0] = mYuvCpuBuffer;
-+             ps_decode_ip->s_out_buffer.pu1_bufs[1] = mYuvCpuBuffer + lumaSize;
-+             ps_decode_ip->s_out_buffer.pu1_bufs[2] = mYuvCpuBuffer + lumaSize + chromaSize;
-+         } else {
-+             ALOGE("CPU YV12 buffer not allocated (stride=%u height=%u)", displayStride, displayHeight);
-+             return false;
-+         }
-+     } else {
-+         ps_decode_ip->s_out_buffer.pu1_bufs[0] = mOutBufferFlush;
-+         ps_decode_ip->s_out_buffer.pu1_bufs[1] = mOutBufferFlush + lumaSize;
-+         ps_decode_ip->s_out_buffer.pu1_bufs[2] = mOutBufferFlush + lumaSize + chromaSize;
-+     }
-     ps_decode_ip->s_out_buffer.u4_num_bufs = 3;
-     ps_decode_op->u4_size = sizeof(ivd_video_decode_op_t);
- 
-+    ALOGD("DBG setDecodeArgs: displayStride=%u mStride=%u displayHeight=%u lumaSize=%u chromaSize=%u "
-+          "planeY=%p planeU=%p planeV=%p outBufW=%u outBufH=%u",
-+          displayStride, mStride, displayHeight, (unsigned)lumaSize, (unsigned)chromaSize,
-+          ps_decode_ip->s_out_buffer.pu1_bufs[0],
-+          ps_decode_ip->s_out_buffer.pu1_bufs[1],
-+          ps_decode_ip->s_out_buffer.pu1_bufs[2],
-+          outBuffer ? outBuffer->width() : 0,
-+          outBuffer ? outBuffer->height() : 0);
-+
-     return true;
- }
- 
-@@ -772,8 +787,13 @@ c2_status_t C2SoftAvcDec::ensureDecoderState(const std::shared_ptr<C2BlockPool>
+     } else {
+         ps_decode_ip->s_out_buffer.pu1_bufs[0] = mOutBufferFlush;
+         ps_decode_ip->s_out_buffer.pu1_bufs[1] = mOutBufferFlush + lumaSize;
+@@ -781,8 +787,13 @@ c2_status_t C2SoftAvcDec::ensureDecoderState(const std::shared_ptr<C2BlockPool>
          mOutBlock.reset();
      }
      if (!mOutBlock) {
@@ -256,7 +216,7 @@ index d7b9e12ce7..608a6f2322 100644
          c2_status_t err =
              pool->fetchGraphicBlock(ALIGN32(mWidth), mHeight, format, usage, &mOutBlock);
          if (err != C2_OK) {
-@@ -784,6 +804,23 @@ c2_status_t C2SoftAvcDec::ensureDecoderState(const std::shared_ptr<C2BlockPool>
+@@ -793,6 +804,23 @@ c2_status_t C2SoftAvcDec::ensureDecoderState(const std::shared_ptr<C2BlockPool>
                mOutBlock->width(), mOutBlock->height(), ALIGN32(mWidth), mHeight);
      }
  
@@ -280,7 +240,7 @@ index d7b9e12ce7..608a6f2322 100644
      return C2_OK;
  }
  
-@@ -800,6 +837,9 @@ void C2SoftAvcDec::process(
+@@ -809,6 +837,9 @@ void C2SoftAvcDec::process(
      work->result = C2_OK;
      work->workletsProcessed = 0u;
      work->worklets.front()->output.flags = work->input.flags;
@@ -290,7 +250,7 @@ index d7b9e12ce7..608a6f2322 100644
      if (mSignalledError || mSignalledOutputEos) {
          work->result = C2_BAD_VALUE;
          return;
-@@ -818,9 +858,16 @@ void C2SoftAvcDec::process(
+@@ -827,9 +858,16 @@ void C2SoftAvcDec::process(
              return;
          }
      }
@@ -307,14 +267,14 @@ index d7b9e12ce7..608a6f2322 100644
      ALOGV("in buffer attr. size %zu timestamp %d frameindex %d, flags %x",
            inSize, (int)work->input.ordinal.timestamp.peeku(),
            (int)work->input.ordinal.frameIndex.peeku(), work->input.flags);
-@@ -864,6 +911,62 @@ void C2SoftAvcDec::process(
+@@ -875,6 +913,47 @@ void C2SoftAvcDec::process(
              TIME_DIFF(mTimeStart, mTimeEnd, decodeTime);
              ALOGV("decodeTime=%6d delay=%6d numBytes=%6d", decodeTime, delay,
-                   s_decode_op.u4_num_bytes_consumed);
+                   ps_decode_op->u4_num_bytes_consumed);
 +
 +            // Convert YV12 (in CPU buffer) -> RGBA_8888 (in graphic block) for display,
 +            // because Tegra gralloc cannot allocate YUV buffers.
-+            if (s_decode_op.u4_output_present && mYuvCpuBuffer) {
++            if (ps_decode_op->u4_output_present && mYuvCpuBuffer) {
 +                uint32_t cpuStride = ALIGN32(mWidth);
 +                size_t lumaSize = (size_t)cpuStride * mHeight;
 +                size_t chromaSize = lumaSize >> 2;
@@ -328,10 +288,6 @@ index d7b9e12ce7..608a6f2322 100644
 +                    uint8_t *rgbaData = const_cast<uint8_t *>(planes[0]);
 +                    int rowInc = wView.layout().planes[0].rowInc;
 +                    uint32_t rgbaStride = (rowInc > 0) ? (uint32_t)(rowInc / 4) : mWidth;
-+                    ALOGD("CONVDBG frame=%d rgbaData=%p rowInc=%d rgbaStride=%u cpuStride=%u "
-+                          "Y0=%d U0=%d V0=%d",
-+                          (int)s_decode_op.u4_ts, rgbaData, rowInc, rgbaStride, cpuStride,
-+                          yPlane[0], uPlane[0], vPlane[0]);
 +
 +                    for (uint32_t y = 0; y < mHeight; y++) {
 +                        const uint8_t *yRow = yPlane + y * cpuStride;
@@ -354,26 +310,15 @@ index d7b9e12ce7..608a6f2322 100644
 +                            dst[x * 4 + 3] = 255;
 +                        }
 +                    }
-+                    // Diagnostic: read back first few pixels to verify CPU sees non-zero data
-+                    static int convDbgCount = 0;
-+                    if (convDbgCount < 3) {
-+                        convDbgCount++;
-+                        ALOGD("CONVDBG2 frame=%d rgba[0..3]=%d,%d,%d,%d rgba[100..103]=%d,%d,%d,%d "
-+                              "rgba[50000..50003]=%d,%d,%d,%d",
-+                              (int)s_decode_op.u4_ts,
-+                              rgbaData[0], rgbaData[1], rgbaData[2], rgbaData[3],
-+                              rgbaData[100], rgbaData[101], rgbaData[102], rgbaData[103],
-+                              rgbaData[50000], rgbaData[50001], rgbaData[50002], rgbaData[50003]);
-+                    }
 +                }
 +            }
          }
-         if (IVD_MEM_ALLOC_FAILED == (s_decode_op.u4_error_code & IVD_ERROR_MASK)) {
+         if (IVD_MEM_ALLOC_FAILED == (ps_decode_op->u4_error_code & IVD_ERROR_MASK)) {
              ALOGE("allocation failure in decoder");
-@@ -992,6 +1095,43 @@ c2_status_t C2SoftAvcDec::drainInternal(
+@@ -1006,6 +1085,43 @@ c2_status_t C2SoftAvcDec::drainInternal(
          }
-         (void) ivdec_api_function(mDecHandle, &s_decode_ip, &s_decode_op);
-         if (s_decode_op.u4_output_present) {
+         (void) ivdec_api_function(mDecHandle, &s_h264d_decode_ip, &s_h264d_decode_op);
+         if (ps_decode_op->u4_output_present) {
 +            // Convert YV12 (CPU buffer) -> RGBA_8888 (graphic block) for display.
 +            if (mYuvCpuBuffer) {
 +                uint32_t cpuStride = ALIGN32(mWidth);
@@ -411,14 +356,14 @@ index d7b9e12ce7..608a6f2322 100644
 +                    }
 +                }
 +            }
-             finishWork(s_decode_op.u4_ts, work);
+             finishWork(ps_decode_op->u4_ts, work);
          } else {
              fillEmptyWork(work);
 diff --git a/media/codec2/components/avc/C2SoftAvcDec.h b/media/codec2/components/avc/C2SoftAvcDec.h
-index bd84de08ea..146ad19879 100644
+index 5c07d29cbe..1a08339c4d 100644
 --- a/media/codec2/components/avc/C2SoftAvcDec.h
 +++ b/media/codec2/components/avc/C2SoftAvcDec.h
-@@ -154,6 +154,10 @@ private:
+@@ -153,6 +153,10 @@ private:
      iv_obj_t *mDecHandle;
      std::shared_ptr<C2GraphicBlock> mOutBlock;
      uint8_t *mOutBufferFlush;
@@ -430,10 +375,10 @@ index bd84de08ea..146ad19879 100644
      size_t mNumCores;
      IV_COLOR_FORMAT_T mIvColorFormat;
 diff --git a/media/codec2/components/base/SimpleC2Component.cpp b/media/codec2/components/base/SimpleC2Component.cpp
-index fb3fbd05e3..b453261bda 100644
+index 6c4b7d9355..a2637b3ece 100644
 --- a/media/codec2/components/base/SimpleC2Component.cpp
 +++ b/media/codec2/components/base/SimpleC2Component.cpp
-@@ -452,6 +452,11 @@ bool SimpleC2Component::processQueue() {
+@@ -455,6 +455,11 @@ bool SimpleC2Component::processQueue() {
          work = queue->pop_front();
          hasQueuedWork = !queue->empty();
      }
@@ -446,63 +391,72 @@ index fb3fbd05e3..b453261bda 100644
          ALOGV("processing pending flush");
          c2_status_t err = onFlush_sm();
 diff --git a/media/codec2/sfplugin/CCodec.cpp b/media/codec2/sfplugin/CCodec.cpp
-index 55ff18f4a2..3ffc6c695a 100644
+index 82460c914b..a53f4bd703 100644
 --- a/media/codec2/sfplugin/CCodec.cpp
 +++ b/media/codec2/sfplugin/CCodec.cpp
-@@ -1916,7 +1916,7 @@ void CCodec::initiateReleaseIfStuck() {
-         }
+@@ -2459,7 +2459,7 @@ void CCodec::initiateReleaseIfStuck() {
+         isMediaTypeKnown = (kKnownMediaTypes.count(config->mCodingMediaType) != 0);
      }
-     if (name.empty()) {
+     if (!tunneled && isMediaTypeKnown && name.empty()) {
 -        constexpr std::chrono::steady_clock::duration kWorkDurationThreshold = 3s;
 +        constexpr std::chrono::steady_clock::duration kWorkDurationThreshold = 60s;
          std::chrono::steady_clock::duration elapsed = mChannel->elapsed();
          if (elapsed >= kWorkDurationThreshold) {
              name = "queue";
 diff --git a/media/codec2/sfplugin/CCodecBufferChannel.cpp b/media/codec2/sfplugin/CCodecBufferChannel.cpp
-index 1654b11c31..0bb246889e 100644
+index 951888b1b6..f15cb4ddd1 100644
 --- a/media/codec2/sfplugin/CCodecBufferChannel.cpp
 +++ b/media/codec2/sfplugin/CCodecBufferChannel.cpp
-@@ -209,6 +209,8 @@ status_t CCodecBufferChannel::queueInputBufferInternal(sp<MediaCodecBuffer> buff
-         flags |= C2FrameData::FLAG_CODEC_CONFIG;
+@@ -224,6 +224,8 @@ status_t CCodecBufferChannel::queueInputBufferInternal(
+         tunnelFirstFrame = true;
      }
      ALOGV("[%s] queueInputBuffer: buffer->size() = %zu", mName, buffer->size());
 +    ALOGD("DBG queueInputBufferInternal: size=%zu timeUs=%lld eos=%d",
 +            buffer->size(), (long long)timeUs, eos ? 1 : 0);
+     std::list<std::unique_ptr<C2Work>> items;
      std::unique_ptr<C2Work> work(new C2Work);
      work->input.ordinal.timestamp = timeUs;
-     work->input.ordinal.frameIndex = mFrameIndex++;
-@@ -264,6 +266,8 @@ status_t CCodecBufferChannel::queueInputBufferInternal(sp<MediaCodecBuffer> buff
-             std::move(queuedBuffers),
-             PipelineWatcher::Clock::now());
-     c2_status_t err = mComponent->queue(&items);
-+    ALOGD("DBG queueInputBufferInternal: mComponent->queue err=%d size=%zu",
-+            err, buffer->size());
-     if (err != C2_OK) {
-         mPipelineWatcher.lock()->onWorkDone(queuedFrameIndex);
+@@ -332,6 +334,8 @@ status_t CCodecBufferChannel::queueInputBufferInternal(
+             }
+         }
+         err = mComponent->queue(&items);
++        ALOGD("DBG queueInputBufferInternal: mComponent->queue err=%d size=%zu",
++                err, buffer->size());
      }
+     if (err != C2_OK) {
+         Mutexed<PipelineWatcher>::Locked watcher(mPipelineWatcher);
 diff --git a/media/codec2/vndk/C2AllocatorGralloc.cpp b/media/codec2/vndk/C2AllocatorGralloc.cpp
-index e1e137776d..d659a8aa25 100644
+index 6a7f19cc2b..2099357e71 100644
 --- a/media/codec2/vndk/C2AllocatorGralloc.cpp
 +++ b/media/codec2/vndk/C2AllocatorGralloc.cpp
-@@ -541,28 +541,37 @@ c2_status_t C2AllocationGralloc::map(
-         case static_cast<uint32_t>(PixelFormat4::YV12):
+@@ -543,37 +543,34 @@ c2_status_t C2AllocationGralloc::map(
+         case static_cast<uint32_t>(PixelFormat4::YCBCR_420_888):
              // fall-through
-         default: {
+         case static_cast<uint32_t>(PixelFormat4::YV12): {
 -            android_ycbcr ycbcrLayout;
 -
 -            status_t err = GraphicBufferMapper::get().lockYCbCr(
+-                    const_cast<native_handle_t*>(mBuffer), grallocUsage, rect, &ycbcrLayout);
 +            // Tegra gralloc HAL (legacy) does not implement lockYCbCr/lock_flex.
 +            // Use the generic lock() (known to work on this HAL, e.g. for the
 +            // RGBA camera path) and compute the planar YUV420 layout manually.
 +            void *pointer = nullptr;
 +            status_t err = GraphicBufferMapper::get().lock(
-                         const_cast<native_handle_t*>(mBuffer), grallocUsage,
-                         { (int32_t)rect.left, (int32_t)rect.top,
-                           (int32_t)rect.width, (int32_t)rect.height },
--                        &ycbcrLayout);
-+                        &pointer);
++                    const_cast<native_handle_t *>(mBuffer), grallocUsage, rect, &pointer);
              if (err) {
--                ALOGE("failed transaction: lockYCbCr");
+-                ALOGE("failed transaction: lockYCbCr (err=%d)", err);
+-                return C2_CORRUPTED;
+-            }
+-            if (!ycbcrLayout.y || !ycbcrLayout.cb || !ycbcrLayout.cr
+-                    || ycbcrLayout.ystride == 0
+-                    || ycbcrLayout.cstride == 0
+-                    || ycbcrLayout.chroma_step == 0) {
+-                ALOGE("invalid layout: lockYCbCr (y=%s cb=%s cr=%s "
+-                        "ystride=%zu cstride=%zu chroma_step=%zu)",
+-                        ycbcrLayout.y ? "(non-null)" : "(null)",
+-                        ycbcrLayout.cb ? "(non-null)" : "(null)",
+-                        ycbcrLayout.cr ? "(non-null)" : "(null)",
+-                        ycbcrLayout.ystride, ycbcrLayout.cstride, ycbcrLayout.chroma_step);
 +                ALOGE("failed transaction: lock(YCbCr)");
                  return C2_CORRUPTED;
              }
@@ -531,7 +485,7 @@ index e1e137776d..d659a8aa25 100644
                  1,                              // mColSampling
                  1,                              // mRowSampling
                  8,                              // allocatedDepth
-@@ -573,42 +582,31 @@ c2_status_t C2AllocationGralloc::map(
+@@ -584,42 +581,31 @@ c2_status_t C2AllocationGralloc::map(
                  0,                              // offset
              };
              layout->planes[C2PlanarLayout::PLANE_U] = {
@@ -595,9 +549,9 @@ index e1e137776d..d659a8aa25 100644
 -            }
              break;
          }
-     }
+ 
 diff --git a/media/libaudiohal/FactoryHalHidl.cpp b/media/libaudiohal/FactoryHalHidl.cpp
-index 5985ef03ac..afb0ba5049 100644
+index e420d079b8..b63c295269 100644
 --- a/media/libaudiohal/FactoryHalHidl.cpp
 +++ b/media/libaudiohal/FactoryHalHidl.cpp
 @@ -94,13 +94,21 @@ bool hasHalService(const std::string& package, const std::string& version,
@@ -649,7 +603,7 @@ index cde8d85e87..38128e152b 100644
  
  } // namespace android
 diff --git a/media/libmediaplayerservice/StagefrightRecorder.cpp b/media/libmediaplayerservice/StagefrightRecorder.cpp
-index c66def491b..32ae72b2d9 100644
+index 209b1f8036..8d49ed5c00 100644
 --- a/media/libmediaplayerservice/StagefrightRecorder.cpp
 +++ b/media/libmediaplayerservice/StagefrightRecorder.cpp
 @@ -16,6 +16,7 @@
@@ -658,9 +612,9 @@ index c66def491b..32ae72b2d9 100644
  #define LOG_TAG "StagefrightRecorder"
 +#include <cutils/properties.h>
  #include <inttypes.h>
- #include <utils/Log.h>
- 
-@@ -1010,10 +1011,13 @@ status_t StagefrightRecorder::start() {
+ // TODO/workaround: including base logging now as it conflicts with ADebug.h
+ // and it must be included first.
+@@ -1219,10 +1220,13 @@ status_t StagefrightRecorder::start() {
      }
  
      status_t status = OK;
@@ -674,7 +628,7 @@ index c66def491b..32ae72b2d9 100644
              return status;
          }
      }
-@@ -1036,6 +1040,22 @@ status_t StagefrightRecorder::start() {
+@@ -1245,6 +1249,22 @@ status_t StagefrightRecorder::start() {
              sp<MetaData> meta = new MetaData;
              setupMPEG4orWEBMMetaData(&meta);
              status = mWriter->start(meta.get());
@@ -697,7 +651,7 @@ index c66def491b..32ae72b2d9 100644
              break;
          }
  
-@@ -1939,12 +1959,14 @@ status_t StagefrightRecorder::setupMPEG4orWEBMRecording() {
+@@ -2166,12 +2186,14 @@ status_t StagefrightRecorder::setupMPEG4orWEBMRecording() {
  
          sp<MediaSource> mediaSource;
          err = setupMediaSource(&mediaSource);
@@ -712,7 +666,7 @@ index c66def491b..32ae72b2d9 100644
          if (err != OK) {
              return err;
          }
-@@ -1961,6 +1983,12 @@ status_t StagefrightRecorder::setupMPEG4orWEBMRecording() {
+@@ -2188,6 +2210,12 @@ status_t StagefrightRecorder::setupMPEG4orWEBMRecording() {
      const bool disableAudio = mCaptureFpsEnable && mCaptureFps < mFrameRate;
      if (!disableAudio && mAudioSource != AUDIO_SOURCE_CNT) {
          err = setupAudioEncoder(writer);
@@ -747,7 +701,7 @@ index 439dbe8eb7..e241777030 100644
                  mbuf->meta_data().dumpToLog();
                  track->mPackets->signalEOS(ERROR_MALFORMED);
 diff --git a/media/libmediaplayerservice/nuplayer/NuPlayerDecoder.cpp b/media/libmediaplayerservice/nuplayer/NuPlayerDecoder.cpp
-index f73443929d..0867036fc9 100644
+index 2c1f158eda..1bcbb27f9c 100644
 --- a/media/libmediaplayerservice/nuplayer/NuPlayerDecoder.cpp
 +++ b/media/libmediaplayerservice/nuplayer/NuPlayerDecoder.cpp
 @@ -565,6 +565,8 @@ void NuPlayer::Decoder::onShutdown(bool notifyComplete) {
@@ -767,7 +721,7 @@ index f73443929d..0867036fc9 100644
          if (err != OK && err != ERROR_END_OF_STREAM) {
              // if EOS, need to queue EOS buffer
              break;
-@@ -873,6 +876,8 @@ status_t NuPlayer::Decoder::fetchInputData(sp<AMessage> &reply) {
+@@ -879,6 +882,8 @@ status_t NuPlayer::Decoder::fetchInputData(sp<AMessage> &reply) {
      bool dropAccessUnit = true;
      do {
          status_t err = mSource->dequeueAccessUnit(mIsAudio, &accessUnit);
@@ -776,7 +730,7 @@ index f73443929d..0867036fc9 100644
  
          if (err == -EWOULDBLOCK) {
              return err;
-@@ -1103,6 +1108,8 @@ bool NuPlayer::Decoder::onInputBufferFetched(const sp<AMessage> &msg) {
+@@ -1127,6 +1132,8 @@ bool NuPlayer::Decoder::onInputBufferFetched(const sp<AMessage> &msg) {
  
          status_t err;
          AString errorDetailMsg;
@@ -786,10 +740,10 @@ index f73443929d..0867036fc9 100644
              err = mCodec->queueSecureInputBuffer(
                      bufferIx,
 diff --git a/media/libstagefright/CameraSource.cpp b/media/libstagefright/CameraSource.cpp
-index be3fde8a0c..eb8d4862eb 100644
+index 95afa62620..99fad6b6b5 100644
 --- a/media/libstagefright/CameraSource.cpp
 +++ b/media/libstagefright/CameraSource.cpp
-@@ -365,29 +365,49 @@ static int32_t getHighSpeedFrameRate(const CameraParameters& params) {
+@@ -260,29 +260,49 @@ status_t CameraSource::isCameraColorFormatSupported(
   */
  status_t CameraSource::configureCamera(
          CameraParameters* params,
@@ -849,7 +803,7 @@ index be3fde8a0c..eb8d4862eb 100644
          return BAD_VALUE;
      } else {  // width == -1 && height == -1
          // Do not configure the camera.
-@@ -658,9 +678,10 @@ status_t CameraSource::initWithCameraAccess(
+@@ -544,9 +564,10 @@ status_t CameraSource::initWithCameraAccess(
      }
  
      // Set the camera to use the requested video frame size
@@ -862,7 +816,7 @@ index be3fde8a0c..eb8d4862eb 100644
                      frameRate))) {
          return err;
      }
-@@ -1127,6 +1148,11 @@ status_t CameraSource::read(
+@@ -907,6 +928,11 @@ status_t CameraSource::read(
          //       Either document why it is safe in this case or address the
          //       issue (e.g. by copying).
          *buffer = new MediaBuffer(frame->unsecurePointer(), frame->size());
@@ -874,7 +828,7 @@ index be3fde8a0c..eb8d4862eb 100644
          (*buffer)->setObserver(this);
          (*buffer)->add_ref();
          (*buffer)->meta_data().setInt64(kKeyTime, frameTime);
-@@ -1415,8 +1441,13 @@ void CameraSource::processBufferQueueFrame(BufferItem& buffer) {
+@@ -1055,8 +1081,13 @@ void CameraSource::processBufferQueueFrame(BufferItem& buffer) {
          (uint8_t*)heap->getBase() + offset);
      memset(payload, 0, sizeof(VideoNativeMetadata));
      payload->eType = kMetadataBufferTypeANWBuffer;
@@ -890,10 +844,10 @@ index be3fde8a0c..eb8d4862eb 100644
      // Add the mapping so we can find the corresponding buffer item to release to the buffer queue
      // when the encoder returns the native window buffer.
 diff --git a/media/libstagefright/MediaCodecSource.cpp b/media/libstagefright/MediaCodecSource.cpp
-index c6ae1596de..7e80dcd4ac 100644
+index 0107c322cd..0b8a2846d1 100644
 --- a/media/libstagefright/MediaCodecSource.cpp
 +++ b/media/libstagefright/MediaCodecSource.cpp
-@@ -38,6 +38,8 @@
+@@ -39,6 +39,8 @@
  #include <media/stagefright/MediaErrors.h>
  #include <media/stagefright/MetaData.h>
  #include <media/stagefright/Utils.h>
@@ -902,7 +856,7 @@ index c6ae1596de..7e80dcd4ac 100644
  
  namespace android {
  
-@@ -574,6 +576,13 @@ status_t MediaCodecSource::initEncoder() {
+@@ -599,6 +601,13 @@ status_t MediaCodecSource::initEncoder() {
          } else {
              mEncoderFormat = kDefaultHwVideoEncoderFormat;
          }
@@ -916,29 +870,11 @@ index c6ae1596de..7e80dcd4ac 100644
          if (!inputFormat->findInt32("android._dataspace", &mEncoderDataSpace)) {
              mEncoderDataSpace = kDefaultVideoEncoderDataSpace;
          }
-@@ -731,7 +740,17 @@ status_t MediaCodecSource::feedEncoderInputBuffers() {
- 
-             size = mbuf->size();
- 
-+            {
-+                VideoNativeMetadata *src = (VideoNativeMetadata *)mbuf->data();
-+                VideoNativeMetadata *dst = (VideoNativeMetadata *)inbuf->data();
-+                ALOGE("MOCHA-REC feedEncoder: idx=%zu mbuf=%p inbuf=%p size=%u srcP=%p dstP=%p (before memcpy)",
-+                    bufferIndex, mbuf->data(), inbuf->data(), (unsigned)size, src->pBuffer, dst->pBuffer);
-+            }
-             memcpy(inbuf->data(), mbuf->data(), size);
-+            {
-+                VideoNativeMetadata *dst = (VideoNativeMetadata *)inbuf->data();
-+                ALOGE("MOCHA-REC feedEncoder: idx=%zu dstP=%p (after memcpy)", bufferIndex, dst->pBuffer);
-+            }
- 
-             if (mIsVideo) {
-                 // video encoder will release MediaBuffer when done
 diff --git a/media/libstagefright/include/media/stagefright/CameraSource.h b/media/libstagefright/include/media/stagefright/CameraSource.h
-index 6f0d3b5ee4..31df0e789d 100644
+index e8770ed6c0..8c16759945 100644
 --- a/media/libstagefright/include/media/stagefright/CameraSource.h
 +++ b/media/libstagefright/include/media/stagefright/CameraSource.h
-@@ -317,7 +317,7 @@ private:
+@@ -265,7 +265,7 @@ private:
  
      status_t isCameraColorFormatSupported(const CameraParameters& params);
      status_t configureCamera(CameraParameters* params,
@@ -948,10 +884,10 @@ index 6f0d3b5ee4..31df0e789d 100644
  
      status_t checkVideoSize(const CameraParameters& params,
 diff --git a/services/audioflinger/AudioFlinger.cpp b/services/audioflinger/AudioFlinger.cpp
-index 764fdc33c0..09fc3e382d 100644
+index 1dd41b337b..0d6abc7581 100644
 --- a/services/audioflinger/AudioFlinger.cpp
 +++ b/services/audioflinger/AudioFlinger.cpp
-@@ -211,8 +211,12 @@ AudioFlinger::AudioFlinger()
+@@ -267,8 +267,12 @@ AudioFlinger::AudioFlinger()
  
      mMediaLogNotifier->run("MediaLogNotifier");
      std::vector<pid_t> halPids;
@@ -966,8 +902,8 @@ index 764fdc33c0..09fc3e382d 100644
  
      // Notify that we have started (also called when audioserver service restarts)
      mediametrics::LogItem(mMetricsId)
-@@ -243,7 +247,9 @@ void AudioFlinger::onFirstRef()
-     gAudioFlinger = this;
+@@ -299,7 +303,9 @@ void AudioFlinger::onFirstRef()
+     gAudioFlinger = this;  // we are already refcounted, store into atomic pointer.
  
      mDevicesFactoryHalCallback = new DevicesFactoryHalCallbackImpl;
 -    mDevicesFactoryHal->setCallbackOnce(mDevicesFactoryHalCallback);
@@ -977,7 +913,7 @@ index 764fdc33c0..09fc3e382d 100644
  }
  
  status_t AudioFlinger::setAudioHalPids(const std::vector<pid_t>& pids) {
-@@ -2169,6 +2175,10 @@ audio_module_handle_t AudioFlinger::loadHwModule_l(const char *name)
+@@ -2240,6 +2246,10 @@ audio_module_handle_t AudioFlinger::loadHwModule_l(const char *name)
  
      sp<DeviceHalInterface> dev;
  
@@ -989,10 +925,10 @@ index 764fdc33c0..09fc3e382d 100644
      if (rc) {
          ALOGE("loadHwModule() error %d loading module %s", rc, name);
 diff --git a/services/camera/libcameraservice/device3/Camera3Device.cpp b/services/camera/libcameraservice/device3/Camera3Device.cpp
-index fc3a5b4901..9f92cda84c 100644
+index 8f080bec87..7e92c3290a 100644
 --- a/services/camera/libcameraservice/device3/Camera3Device.cpp
 +++ b/services/camera/libcameraservice/device3/Camera3Device.cpp
-@@ -3292,14 +3292,25 @@ status_t Camera3Device::HalInterface::configureStreams(const camera_metadata_t *
+@@ -3521,14 +3521,25 @@ status_t Camera3Device::HalInterface::configureStreams(const camera_metadata_t *
  
          if (dstStream->getOriginalFormat() != HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED) {
              dstStream->setFormatOverride(false);
