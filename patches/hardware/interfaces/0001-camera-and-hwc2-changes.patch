@@ -1,8 +1,8 @@
 diff --git a/camera/device/3.2/default/CameraDeviceSession.cpp b/camera/device/3.2/default/CameraDeviceSession.cpp
-index 99cdccbcd..73258a4ec 100644
+index 896c35843..294fe72dc 100644
 --- a/camera/device/3.2/default/CameraDeviceSession.cpp
 +++ b/camera/device/3.2/default/CameraDeviceSession.cpp
-@@ -1376,9 +1376,17 @@ status_t CameraDeviceSession::constructCaptureResult(CaptureResult& result,
+@@ -1377,9 +1377,17 @@ status_t CameraDeviceSession::constructCaptureResult(CaptureResult& result,
      // within the scope of this function
      result.frameNumber = frameNumber;
      result.fmqResultSize = 0;
@@ -22,7 +22,7 @@ index 99cdccbcd..73258a4ec 100644
          bool resultOverriden = false;
          Mutex::Autolock _l(mInflightLock);
  
-@@ -1566,6 +1574,12 @@ void CameraDeviceSession::sProcessCaptureResult(
+@@ -1567,6 +1575,12 @@ void CameraDeviceSession::sProcessCaptureResult(
      CameraDeviceSession *d =
              const_cast<CameraDeviceSession*>(static_cast<const CameraDeviceSession*>(cb));
  
@@ -36,17 +36,22 @@ index 99cdccbcd..73258a4ec 100644
      camera3_capture_result shadowResult;
      bool handlePhysCam = (d->mDeviceVersion >= CAMERA_DEVICE_API_VERSION_3_5);
 diff --git a/graphics/composer/2.1/utils/hwc2on1adapter/HWC2On1Adapter.cpp b/graphics/composer/2.1/utils/hwc2on1adapter/HWC2On1Adapter.cpp
-index 572383a37..c4ad5d66c 100644
+index 37021716c..78b6739d3 100644
 --- a/graphics/composer/2.1/utils/hwc2on1adapter/HWC2On1Adapter.cpp
 +++ b/graphics/composer/2.1/utils/hwc2on1adapter/HWC2On1Adapter.cpp
-@@ -2269,10 +2269,15 @@ void HWC2On1Adapter::populateCapabilities() {
+@@ -27,6 +27,7 @@
+ 
+ #include <chrono>
+ #include <cstdlib>
++#include <cutils/properties.h>
+ #include <sstream>
+ 
+ #include <hardware/hwcomposer.h>
+@@ -2268,7 +2269,17 @@ void HWC2On1Adapter::populateCapabilities() {
      // Some devices might have HWC1 retire fences that accurately emulate
      // HWC2 present fences when they are deferred, but it's not very reliable.
      // To be safe, we indicate PresentFenceIsNotReliable for all HWC1 devices.
--    // Mocha (Tegra K1): fences ARE reliable - NVIDIA GL composer syncs to vblank.
--    char platform[PROP_VALUE_MAX] = {0};
--    property_get("ro.board.platform", platform, "");
--    if (strcmp(platform, "tegra") != 0) {
+-    mCapabilities.insert(Capability::PresentFenceIsNotReliable);
 +    //
 +    // Mocha (Tegra K1): the NVIDIA GL composer syncs to vblank and its retire
 +    // fences are reliable, so trusting them removes tearing. However, trusting
@@ -56,6 +61,8 @@ index 572383a37..c4ad5d66c 100644
 +    char reliableFences[PROP_VALUE_MAX] = {0};
 +    property_get("debug.mocha.reliable_fences", reliableFences, "0");
 +    if (atoi(reliableFences) != 1) {
-         mCapabilities.insert(Capability::PresentFenceIsNotReliable);
-     }
++        mCapabilities.insert(Capability::PresentFenceIsNotReliable);
++    }
  }
+ 
+ HWC2On1Adapter::Display* HWC2On1Adapter::getDisplay(hwc2_display_t id) {
