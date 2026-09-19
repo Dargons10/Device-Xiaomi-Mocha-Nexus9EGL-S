@@ -17,8 +17,11 @@
 #include <cutils/log.h>
 #include <cutils/properties.h>
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #define TAG "conn_init"
 #define MAC_PARTITION1 "/dev/block/platform/sdhci-tegra.3/by-name/BKB"
