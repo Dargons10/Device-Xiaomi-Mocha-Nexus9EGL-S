@@ -1,8 +1,8 @@
 diff --git a/src/com/android/gallery3d/app/MovieActivity.java b/src/com/android/gallery3d/app/MovieActivity.java
-index fa4a0f970..ccca372eb 100644
+index 6c569c84c..f83e3aa1b 100644
 --- a/src/com/android/gallery3d/app/MovieActivity.java
 +++ b/src/com/android/gallery3d/app/MovieActivity.java
-@@ -70,7 +70,7 @@ import org.codeaurora.gallery3d.video.MovieTitleHelper;
+@@ -70,7 +70,7 @@ import com.android.gallery3d.video.MovieTitleHelper;
  public class MovieActivity extends AbstractPermissionActivity {
      @SuppressWarnings("unused")
      private static final String  TAG = "MovieActivity";
@@ -12,7 +12,7 @@ index fa4a0f970..ccca372eb 100644
      public  static final String  KEY_TREAT_UP_AS_BACK = "treat-up-as-back";
      private static final String  VIDEO_SDP_MIME_TYPE = "application/sdp";
 diff --git a/src/com/android/gallery3d/app/MoviePlayer.java b/src/com/android/gallery3d/app/MoviePlayer.java
-index 7db8dcfa0..9b93cff18 100755
+index 1cd0bd312..acfdde67c 100755
 --- a/src/com/android/gallery3d/app/MoviePlayer.java
 +++ b/src/com/android/gallery3d/app/MoviePlayer.java
 @@ -79,7 +79,7 @@ public class MoviePlayer implements
@@ -24,10 +24,10 @@ index 7db8dcfa0..9b93cff18 100755
  
      private static final String KEY_VIDEO_POSITION = "video-position";
      private static final String KEY_RESUMEABLE_TIME = "resumeable-timeout";
-diff --git a/src/org/codeaurora/gallery3d/video/CodeauroraVideoView.java b/src/org/codeaurora/gallery3d/video/CodeauroraVideoView.java
-index 415972aee..6b5a9bef0 100644
---- a/src/org/codeaurora/gallery3d/video/CodeauroraVideoView.java
-+++ b/src/org/codeaurora/gallery3d/video/CodeauroraVideoView.java
+diff --git a/src/com/android/gallery3d/video/CodeauroraVideoView.java b/src/com/android/gallery3d/video/CodeauroraVideoView.java
+index bcf641ce0..27e6f6ef9 100644
+--- a/src/com/android/gallery3d/video/CodeauroraVideoView.java
++++ b/src/com/android/gallery3d/video/CodeauroraVideoView.java
 @@ -45,7 +45,7 @@ import java.util.Map;
   * such as scaling and tinting.
   */

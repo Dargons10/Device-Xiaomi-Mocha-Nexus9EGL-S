@@ -1,8 +1,8 @@
 diff --git a/bcmdhd/wifi_hal/wifi_hal.cpp b/bcmdhd/wifi_hal/wifi_hal.cpp
-index 258725c..91d43e6 100755
+index c83c482..952b1ff 100755
 --- a/bcmdhd/wifi_hal/wifi_hal.cpp
 +++ b/bcmdhd/wifi_hal/wifi_hal.cpp
-@@ -276,6 +276,7 @@ wifi_error wifi_pre_initialize(void)
+@@ -384,6 +384,7 @@ wifi_error wifi_pre_initialize(void)
      if (socketpair(AF_UNIX, SOCK_STREAM, 0, halInfo->cleanup_socks) == -1) {
          ALOGE("Could not create cleanup sockets");
          free(halInfo);
@@ -10,7 +10,7 @@ index 258725c..91d43e6 100755
          return WIFI_ERROR_UNKNOWN;
      }
  
-@@ -283,6 +284,7 @@ wifi_error wifi_pre_initialize(void)
+@@ -391,6 +392,7 @@ wifi_error wifi_pre_initialize(void)
      if (cmd_sock == NULL) {
          ALOGE("Could not create handle");
          free(halInfo);
@@ -18,7 +18,7 @@ index 258725c..91d43e6 100755
          return WIFI_ERROR_UNKNOWN;
      }
  
-@@ -298,6 +300,7 @@ wifi_error wifi_pre_initialize(void)
+@@ -406,6 +408,7 @@ wifi_error wifi_pre_initialize(void)
          ALOGE("Could not create handle");
          nl_socket_free(cmd_sock);
          free(halInfo);
@@ -26,7 +26,7 @@ index 258725c..91d43e6 100755
          return WIFI_ERROR_UNKNOWN;
      }
  
-@@ -315,6 +318,7 @@ wifi_error wifi_pre_initialize(void)
+@@ -423,6 +426,7 @@ wifi_error wifi_pre_initialize(void)
          nl_socket_free(cmd_sock);
          nl_socket_free(event_sock);
          free(halInfo);
@@ -34,7 +34,7 @@ index 258725c..91d43e6 100755
          return WIFI_ERROR_UNKNOWN;
      }
  
-@@ -341,6 +345,7 @@ wifi_error wifi_pre_initialize(void)
+@@ -449,6 +453,7 @@ wifi_error wifi_pre_initialize(void)
          nl_socket_free(cmd_sock);
          nl_socket_free(event_sock);
          free(halInfo);
@@ -42,7 +42,7 @@ index 258725c..91d43e6 100755
          return WIFI_ERROR_UNKNOWN;
      }
  
-@@ -355,6 +360,7 @@ wifi_error wifi_pre_initialize(void)
+@@ -463,6 +468,7 @@ wifi_error wifi_pre_initialize(void)
          nl_socket_free(event_sock);
          pthread_mutex_destroy(&halInfo->cb_lock);
          free(halInfo);
@@ -50,7 +50,7 @@ index 258725c..91d43e6 100755
          return WIFI_ERROR_NOT_AVAILABLE;
      }
  
-@@ -367,6 +373,7 @@ wifi_error wifi_pre_initialize(void)
+@@ -475,6 +481,7 @@ wifi_error wifi_pre_initialize(void)
          nl_socket_free(event_sock);
          pthread_mutex_destroy(&halInfo->cb_lock);
          free(halInfo);
@@ -58,7 +58,7 @@ index 258725c..91d43e6 100755
          return WIFI_ERROR_NOT_AVAILABLE;
      }
  
-@@ -497,6 +504,7 @@ static void internal_cleaned_up_handler(wifi_handle handle)
+@@ -599,6 +606,7 @@ static void internal_cleaned_up_handler(wifi_handle handle)
      DestroyResponseLock();
      pthread_mutex_destroy(&info->cb_lock);
      free(info);
@@ -66,9 +66,9 @@ index 258725c..91d43e6 100755
  
      ALOGI("Internal cleanup completed");
  }
-@@ -508,6 +516,14 @@ void wifi_internal_module_cleanup()
- void wifi_cleanup(wifi_handle handle, wifi_cleaned_up_handler handler)
- {
+@@ -617,6 +625,14 @@ void wifi_cleanup(wifi_handle handle, wifi_cleaned_up_handler handler)
+     }
+ 
      hal_info *info = getHalInfo(handle);
 +    if (!info || info != halInfo) {
 +        // Null handle, or a stale handle from a previous (already freed)
@@ -81,52 +81,7 @@ index 258725c..91d43e6 100755
      char buf[64];
      wifi_error result;
  
-@@ -539,24 +555,28 @@ void wifi_cleanup(wifi_handle handle, wifi_cleaned_up_handler handler)
-         ALOGE("Not cleaning up hal as global_iface is NULL");
-     }
- 
--    if (TEMP_FAILURE_RETRY(write(info->cleanup_socks[0], "Exit", 4)) < 1) {
--        // As a fallback set the cleanup flag to TRUE
--        ALOGE("could not write to the cleanup socket");
--    } else {
--        // Listen to the response
--        // Hopefully we dont get errors or get hung up
--        // Not much can be done in that case, but assume that
--        // it has rx'ed the Exit message to exit the thread.
--        // As a fallback set the cleanup flag to TRUE
--        memset(buf, 0, sizeof(buf));
--        ssize_t result = TEMP_FAILURE_RETRY(read(info->cleanup_socks[0], buf, sizeof(buf)));
--        ALOGE("%s: Read after POLL returned %zd, error no = %d (%s)", __FUNCTION__,
--               result, errno, strerror(errno));
--        if (strncmp(buf, "Done", 4) == 0) {
--            ALOGE("Event processing terminated");
-+    if (info->cleanup_socks[0] >= 0) {
-+        if (TEMP_FAILURE_RETRY(write(info->cleanup_socks[0], "Exit", 4)) < 1) {
-+            // As a fallback set the cleanup flag to TRUE
-+            ALOGE("could not write to the cleanup socket");
-         } else {
--            ALOGD("Rx'ed %s", buf);
-+            // Listen to the response
-+            // Hopefully we dont get errors or get hung up
-+            // Not much can be done in that case, but assume that
-+            // it has rx'ed the Exit message to exit the thread.
-+            // As a fallback set the cleanup flag to TRUE
-+            memset(buf, 0, sizeof(buf));
-+            ssize_t result = TEMP_FAILURE_RETRY(read(info->cleanup_socks[0], buf, sizeof(buf)));
-+            ALOGE("%s: Read after POLL returned %zd, error no = %d (%s)", __FUNCTION__,
-+                   result, errno, strerror(errno));
-+            if (strncmp(buf, "Done", 4) == 0) {
-+                ALOGE("Event processing terminated");
-+            } else {
-+                ALOGD("Rx'ed %s", buf);
-+            }
-         }
-+    } else {
-+        ALOGE("cleanup socket not valid, skipping event loop termination signal");
-     }
-     info->clean_up = true;
-     wifi_internal_module_cleanup();
-@@ -586,6 +606,15 @@ void wifi_cleanup(wifi_handle handle, wifi_cleaned_up_handler handler)
+@@ -668,6 +684,15 @@ void wifi_cleanup(wifi_handle handle, wifi_cleaned_up_handler handler)
          cmd_info *cmdi = &(info->cmd[bad_commands]);
          WifiCommand *cmd = cmdi->cmd;
          if (cmd != NULL) {
@@ -142,3 +97,20 @@ index 258725c..91d43e6 100755
              ALOGI("Cancelling command %p:%s", cmd, cmd->getType());
              pthread_mutex_unlock(&info->cb_lock);
              cmd->cancel();
+@@ -697,9 +722,13 @@ void wifi_cleanup(wifi_handle handle, wifi_cleaned_up_handler handler)
+ 
+     info->clean_up = true;
+ 
+-    if (TEMP_FAILURE_RETRY(write(info->cleanup_socks[0], "Exit", 4)) < 1) {
+-        // As a fallback set the cleanup flag to TRUE
+-        ALOGE("could not write to the cleanup socket");
++    if (info->cleanup_socks[0] >= 0) {
++        if (TEMP_FAILURE_RETRY(write(info->cleanup_socks[0], "Exit", 4)) < 1) {
++            // As a fallback set the cleanup flag to TRUE
++            ALOGE("could not write to the cleanup socket");
++        }
++    } else {
++        ALOGE("cleanup socket not valid, skipping event loop termination signal");
+     }
+     ALOGE("wifi_clean_up done");
+ }

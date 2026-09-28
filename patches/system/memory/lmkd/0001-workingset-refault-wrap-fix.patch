@@ -1,54 +1,16 @@
 diff --git a/lmkd.cpp b/lmkd.cpp
-index 3515fdb..8cbf9b5 100644
+index 926a1d0..f3f4085 100644
 --- a/lmkd.cpp
 +++ b/lmkd.cpp
-@@ -334,21 +334,18 @@ struct zoneinfo_zone {
- enum zoneinfo_node_field {
-     ZI_NODE_NR_INACTIVE_FILE = 0,
-     ZI_NODE_NR_ACTIVE_FILE,
--    ZI_NODE_WORKINGSET_REFAULT,
-     ZI_NODE_FIELD_COUNT
- };
- 
- static const char* const zoneinfo_node_field_names[ZI_NODE_FIELD_COUNT] = {
-     "nr_inactive_file",
-     "nr_active_file",
--    "workingset_refault",
- };
- 
- union zoneinfo_node_fields {
-     struct {
-         int64_t nr_inactive_file;
-         int64_t nr_active_file;
--        int64_t workingset_refault;
-     } field;
-     int64_t arr[ZI_NODE_FIELD_COUNT];
- };
-@@ -369,7 +366,6 @@ struct zoneinfo {
-     int64_t totalreserve_pages;
-     int64_t total_inactive_file;
-     int64_t total_active_file;
--    int64_t total_workingset_refault;
- };
- 
- /* Fields to parse in /proc/meminfo */
-@@ -1719,7 +1715,6 @@ static int zoneinfo_parse(struct zoneinfo *zi) {
-         }
-         zi->total_inactive_file += node->fields.field.nr_inactive_file;
-         zi->total_active_file += node->fields.field.nr_active_file;
--        zi->total_workingset_refault += node->fields.field.workingset_refault;
-     }
-     return 0;
- }
-@@ -2402,6 +2397,11 @@ static void mp_event_psi(int data, uint32_t events, struct polling_params *poll_
-     } else if (vs.field.workingset_refault == prev_workingset_refault) {
-         /* Device is not thrashing and not reclaiming, bail out early until we see these stats changing*/
+@@ -2570,6 +2570,11 @@ static void mp_event_psi(int data, uint32_t events, struct polling_params *poll_
+          * changing
+          */
          goto no_kill;
-+    } else if (vs.field.workingset_refault < prev_workingset_refault) {
++    } else if (workingset_refault_file < prev_workingset_refault) {
 +        /* workingset_refault counter wrapped or is unavailable, reset baseline */
-+        prev_workingset_refault = vs.field.workingset_refault;
-+        init_ws_refault = vs.field.workingset_refault;
++        prev_workingset_refault = workingset_refault_file;
++        init_ws_refault = workingset_refault_file;
 +        goto no_kill;
      }
  
-     prev_workingset_refault = vs.field.workingset_refault;
+     prev_workingset_refault = workingset_refault_file;
