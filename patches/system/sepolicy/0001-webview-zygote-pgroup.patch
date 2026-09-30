@@ -1,5 +1,5 @@
 diff --git a/prebuilts/api/30.0/private/webview_zygote.te b/prebuilts/api/30.0/private/webview_zygote.te
-index 969ab9cc9..8e82dad89 100644
+index 969ab9c..8e82dad 100644
 --- a/prebuilts/api/30.0/private/webview_zygote.te
 +++ b/prebuilts/api/30.0/private/webview_zygote.te
 @@ -73,9 +73,11 @@ allow webview_zygote zygote:process sigchld;
@@ -16,11 +16,29 @@ index 969ab9cc9..8e82dad89 100644
  
  # Send unsolicited message to system_server
  unix_socket_send(webview_zygote, system_unsolzygote, system_server)
+diff --git a/prebuilts/api/32.0/private/webview_zygote.te b/prebuilts/api/32.0/private/webview_zygote.te
+index 3473eca..5fa103f 100644
+--- a/prebuilts/api/32.0/private/webview_zygote.te
++++ b/prebuilts/api/32.0/private/webview_zygote.te
+@@ -76,9 +76,11 @@ allow webview_zygote zygote:process sigchld;
+ # Allow apps access to /vendor/overlay
+ r_dir_file(webview_zygote, vendor_overlay_file)
+ 
+-allow webview_zygote same_process_hal_file:file { execute read open getattr map };
++# Allow webview_zygote to manage the pgroup of its children.
++allow webview_zygote system_server:process getpgid;
+ 
+-allow webview_zygote system_data_file:lnk_file r_file_perms;
++# Interaction between the webview_zygote and its children.
++allow webview_zygote isolated_app:process setpgid;
+ 
+ # Send unsolicited message to system_server
+ unix_socket_send(webview_zygote, system_unsolzygote, system_server)
 diff --git a/private/webview_zygote.te b/private/webview_zygote.te
-index 969ab9cc9..8e82dad89 100644
+index 3473eca..5fa103f 100644
 --- a/private/webview_zygote.te
 +++ b/private/webview_zygote.te
-@@ -73,9 +73,11 @@ allow webview_zygote zygote:process sigchld;
+@@ -76,9 +76,11 @@ allow webview_zygote zygote:process sigchld;
  # Allow apps access to /vendor/overlay
  r_dir_file(webview_zygote, vendor_overlay_file)
  
