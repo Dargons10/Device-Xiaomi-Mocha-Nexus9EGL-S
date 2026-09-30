@@ -1,3 +1,9 @@
+# VNDK
+# ro.product.first_api_level is set in vendor.prop (it is blacklisted from the
+# system build.prop, so it must live in the vendor build.prop to be seen at boot).
+PRODUCT_PROPERTY_OVERRIDES += \
+    ro.vndk.version=9
+
 # ADB
 PRODUCT_PROPERTY_OVERRIDES += \
   persist.service.adb.enable=1 \
@@ -15,9 +21,17 @@ PRODUCT_PROPERTY_OVERRIDES += \
     persist.vendor.bt.a2dp_offload_cap=sbc-aptx-aptxtws-aptxhd-aac-ldac \
     persist.vendor.btstack.a2dp_offload_cap=sbc-aptx-aptxtws-aptxhd-aac-ldacs
 
+# BPF
+PRODUCT_PROPERTY_OVERRIDES += \
+    ro.kernel.ebpf.supported=false
+
 # BT
 PRODUCT_PROPERTY_OVERRIDES += \
     ro.bt.bdaddr_path=/data/mocha_btmacaddr.txt
+
+# Timezone (default; TimeZoneDetector auto-detect falls back to a wrong zone)
+PRODUCT_PROPERTY_OVERRIDES += \
+    persist.sys.timezone=Europe/Madrid
 
 # Dalvik
 PRODUCT_PROPERTY_OVERRIDES += \
@@ -63,7 +77,8 @@ PRODUCT_PROPERTY_OVERRIDES += \
     ro.surface_flinger.max_frame_buffer_acquired_buffers=2 \
     debug.sf.disable_hwc=1 \
     ro.sf.use_hwc_vsync=0 \
-    persist.sf.force_gpu_composition=1
+    persist.sf.force_gpu_composition=1 \
+    debug.renderengine.backend=threaded
 
 # Lineage genuine
 PRODUCT_PROPERTY_OVERRIDES += \

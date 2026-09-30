@@ -1,0 +1,5 @@
+# VINTF: ro.product.first_api_level is blacklisted from the system build.prop,
+# so it is set here (vendor build.prop) to be available at boot.
+# Value 14 (< 26) makes VintfObject::getCombinedFrameworkMatrix infer
+# Level::LEGACY, treating all FCM HALs as optional (pre-Treble device).
+ro.product.first_api_level=14
