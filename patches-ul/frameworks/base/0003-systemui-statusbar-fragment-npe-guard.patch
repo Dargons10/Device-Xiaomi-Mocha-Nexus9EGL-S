@@ -1,0 +1,33 @@
+From 2dee48449b19ae4ac4440bde886295061a65dd47 Mon Sep 17 00:00:00 2001
+From: Dargons10 <jdamr2p@gmail.com>
+Date: Wed, 30 Sep 2026 22:16:50 +0200
+Subject: [PATCH] fix: SystemUI statusbar fragment NPE
+
+Add null-context guard in CollapsedStatusBarFragment.onTuningChanged().
+When the fragment is detached (getContext() == null), calling
+StatusBarIconController.getIconHideList() throws NPE, crashing
+SystemUI.
+
+Co-authored-by: Qwen3.8-27B-local
+Signed-off-by: Opencode <opencode@opencode.ai>
+---
+ .../statusbar/phone/fragment/CollapsedStatusBarFragment.java   | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/phone/fragment/CollapsedStatusBarFragment.java b/packages/SystemUI/src/com/android/systemui/statusbar/phone/fragment/CollapsedStatusBarFragment.java
+index 713f72a2427e..6216302f6efc 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/phone/fragment/CollapsedStatusBarFragment.java
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/phone/fragment/CollapsedStatusBarFragment.java
+@@ -285,6 +285,9 @@ public class CollapsedStatusBarFragment extends Fragment implements CommandQueue
+ 
+     @Override
+     public void onTuningChanged(String key, String newValue) {
++        if (getContext() == null) {
++            return;
++        }
+         boolean wasClockBlacklisted = mIsClockBlacklisted;
+         mIsClockBlacklisted = StatusBarIconController.getIconHideList(
+                 getContext(), newValue).contains("clock");
+-- 
+2.47.3
+

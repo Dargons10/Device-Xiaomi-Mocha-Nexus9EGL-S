@@ -1,0 +1,93 @@
+From fe0cd2d9ded95f73e9e7bf3b743c6500ef7d6e73 Mon Sep 17 00:00:00 2001
+From: Dargons10 <jdamr2p@gmail.com>
+Date: Wed, 30 Sep 2026 22:16:35 +0200
+Subject: [PATCH] fix: biometric PromptInfo missing field and protected
+ packages array
+
+Add mClassNameIfItIsConfirmDeviceCredentialActivity field to PromptInfo
+and the corresponding Builder method in BiometricPrompt. Add
+config_biometric_protected_package_names to config.xml and symbols.xml
+(required by the biometric framework in 19.1).
+
+Co-authored-by: Qwen3.8-27B-local
+Signed-off-by: Opencode <opencode@opencode.ai>
+---
+ .../android/hardware/biometrics/BiometricPrompt.java  | 11 +++++++++++
+ core/java/android/hardware/biometrics/PromptInfo.java |  5 +++++
+ core/res/res/values/config.xml                        |  2 ++
+ core/res/res/values/symbols.xml                       |  1 +
+ 4 files changed, 19 insertions(+)
+
+diff --git a/core/java/android/hardware/biometrics/BiometricPrompt.java b/core/java/android/hardware/biometrics/BiometricPrompt.java
+index 520234bcf050..9928c26c4e7f 100644
+--- a/core/java/android/hardware/biometrics/BiometricPrompt.java
++++ b/core/java/android/hardware/biometrics/BiometricPrompt.java
+@@ -432,6 +432,17 @@ public class BiometricPrompt implements BiometricAuthenticator, BiometricConstan
+             return this;
+         }
+ 
++        /**
++         * Set the class name if it is a confirm device credential activity.
++         * @return This builder.
++         * @hide
++         */
++        @NonNull
++        public Builder setClassNameIfItIsConfirmDeviceCredentialActivity() {
++            mPromptInfo.setClassNameIfItIsConfirmDeviceCredentialActivity();
++            return this;
++        }
++
+         /**
+          * Creates a {@link BiometricPrompt}.
+          *
+diff --git a/core/java/android/hardware/biometrics/PromptInfo.java b/core/java/android/hardware/biometrics/PromptInfo.java
+index 2742f0effde6..be0fb4a0d877 100644
+--- a/core/java/android/hardware/biometrics/PromptInfo.java
++++ b/core/java/android/hardware/biometrics/PromptInfo.java
+@@ -47,6 +47,7 @@ public class PromptInfo implements Parcelable {
+     private boolean mAllowBackgroundAuthentication;
+     private boolean mIgnoreEnrollmentState;
+     private boolean mIsForLegacyFingerprintManager = false;
++    private boolean mClassNameIfItIsConfirmDeviceCredentialActivity;
+ 
+     public PromptInfo() {
+ 
+@@ -213,6 +214,10 @@ public class PromptInfo implements Parcelable {
+         mAllowedSensorIds.add(sensorId);
+     }
+ 
++    public void setClassNameIfItIsConfirmDeviceCredentialActivity() {
++        mClassNameIfItIsConfirmDeviceCredentialActivity = true;
++    }
++
+     // Getters
+ 
+     public CharSequence getTitle() {
+diff --git a/core/res/res/values/config.xml b/core/res/res/values/config.xml
+index a7d55479d2c3..edde164acab2 100644
+--- a/core/res/res/values/config.xml
++++ b/core/res/res/values/config.xml
+@@ -4614,6 +4614,8 @@
+     <string-array name="config_biometric_sensors" translatable="false" >
+         <!-- <item>0:2:15</item>  ID0:Fingerprint:Strong -->
+     </string-array>
++    <!-- List of packages that are protected by biometric authentication. -->
++    <string-array name="config_biometric_protected_package_names" translatable="false"/>
+     <!--If true, allows the device to load udfps components on older HIDL implementations -->
+     <bool name="allow_test_udfps" translatable="false" >false</bool>
+ 
+diff --git a/core/res/res/values/symbols.xml b/core/res/res/values/symbols.xml
+index 06715613e90c..772d4cfcf584 100644
+--- a/core/res/res/values/symbols.xml
++++ b/core/res/res/values/symbols.xml
+@@ -2619,6 +2619,7 @@
+ 
+   <java-symbol type="string" name="config_biometric_prompt_ui_package" />
+   <java-symbol type="array" name="config_biometric_sensors" />
++  <java-symbol type="array" name="config_biometric_protected_package_names" />
+   <java-symbol type="bool" name="allow_test_udfps" />
+   <java-symbol type="array" name="config_udfps_sensor_props" />
+   <java-symbol type="array" name="config_sfps_sensor_props" />
+-- 
+2.47.3
+

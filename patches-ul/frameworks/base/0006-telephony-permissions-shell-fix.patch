@@ -1,0 +1,37 @@
+From b4c8ffe9ead9f1c77838c41a588ecc39bd160aa8 Mon Sep 17 00:00:00 2001
+From: Dargons10 <jdamr2p@gmail.com>
+Date: Wed, 30 Sep 2026 22:17:13 +0200
+Subject: [PATCH] fix: TelephonyPermissions missing isShell method
+
+Add isShell(int uid) method to TelephonyPermissions. The 19.1
+telephony framework calls this method for shell/root UID checks.
+
+Co-authored-by: Qwen3.8-27B-local
+Signed-off-by: Opencode <opencode@opencode.ai>
+---
+ .../android/internal/telephony/TelephonyPermissions.java | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/telephony/common/com/android/internal/telephony/TelephonyPermissions.java b/telephony/common/com/android/internal/telephony/TelephonyPermissions.java
+index 7a424c87d1d6..77149ccdf9b9 100644
+--- a/telephony/common/com/android/internal/telephony/TelephonyPermissions.java
++++ b/telephony/common/com/android/internal/telephony/TelephonyPermissions.java
+@@ -749,6 +749,15 @@ public final class TelephonyPermissions {
+         throw new SecurityException(message + ": Only shell user can call it");
+     }
+ 
++    /**
++     * Returns whether the given uid is the shell (or root) uid.
++     *
++     * @param uid the uid to check.
++     */
++    public static boolean isShell(int uid) {
++        return uid == Process.SHELL_UID || uid == Process.ROOT_UID;
++    }
++
+     /**
+      * Returns the target SDK version number for a given package name.
+      *
+-- 
+2.47.3
+

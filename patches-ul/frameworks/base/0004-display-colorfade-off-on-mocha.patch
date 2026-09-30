@@ -1,0 +1,39 @@
+From 19fbb8cf73475b42daf6da7763b93a01fa765372 Mon Sep 17 00:00:00 2001
+From: Dargons10 <jdamr2p@gmail.com>
+Date: Wed, 30 Sep 2026 22:16:58 +0200
+Subject: [PATCH] fix: ColorFade stall on Tegra124
+
+The ColorFade surface stalls on the EGL blob at screen-off
+(dequeueBuffer to SurfaceFlinger never returns while e.g. a media
+scan saturates I/O), wedging the PowerManagerService handler until
+the watchdog soft-reboots system_server. Default it off; opt back in
+with persist.sys.display.color_fade=1.
+
+Co-authored-by: Qwen3.8-27B-local
+Signed-off-by: Opencode <opencode@opencode.ai>
+---
+ .../android/server/display/DisplayPowerController.java    | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/services/core/java/com/android/server/display/DisplayPowerController.java b/services/core/java/com/android/server/display/DisplayPowerController.java
+index d590ae8fa6d0..b9283169ddc1 100644
+--- a/services/core/java/com/android/server/display/DisplayPowerController.java
++++ b/services/core/java/com/android/server/display/DisplayPowerController.java
+@@ -531,7 +531,13 @@ final class DisplayPowerController implements AutomaticBrightnessController.Call
+ 
+         setUpAutoBrightness(resources, handler);
+ 
+-        mColorFadeEnabled = !ActivityManager.isLowRamDeviceStatic();
++        /* Tegra124 (mocha): the ColorFade surface stalls on the EGL blob at
++           screen-off (dequeueBuffer to SurfaceFlinger never returns while
++           e.g. a media scan saturates I/O), wedging the PowerManagerService
++           handler until the watchdog soft-reboots system_server. Default it
++           off here; opt back in with persist.sys.display.color_fade=1. */
++        mColorFadeEnabled = SystemProperties.getInt("persist.sys.display.color_fade", 0) != 0
++                && !ActivityManager.isLowRamDeviceStatic();
+         mColorFadeFadesConfig = resources.getBoolean(
+                 com.android.internal.R.bool.config_animateScreenLights);
+ 
+-- 
+2.47.3
+

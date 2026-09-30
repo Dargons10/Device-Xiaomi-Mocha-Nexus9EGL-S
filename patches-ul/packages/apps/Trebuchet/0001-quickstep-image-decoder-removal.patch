@@ -1,0 +1,48 @@
+From 2dd9154f5623f238c5bd13b1713a99acdcb4994a Mon Sep 17 00:00:00 2001
+From: Dargons10 <jdamr2p@gmail.com>
+Date: Wed, 30 Sep 2026 22:17:47 +0200
+Subject: [PATCH] fix: remove setupImageDecoder from
+ QuickstepProcessInitializer
+
+The ImageDecoder API is not available on the 19.1 framework for
+this device. Remove the setupImageDecoder() method and its call
+to avoid a build failure.
+
+Co-authored-by: Qwen3.8-27B-local
+Change-Id: I4b61f001ec03e644ac69e4290464728ff2018832
+Signed-off-by: Opencode <opencode@opencode.ai>
+---
+ .../quickstep/QuickstepProcessInitializer.java       | 12 ------------
+ 1 file changed, 12 deletions(-)
+
+diff --git a/quickstep/src/com/android/quickstep/QuickstepProcessInitializer.java b/quickstep/src/com/android/quickstep/QuickstepProcessInitializer.java
+index 43c5c553c0..60586f2cb5 100644
+--- a/quickstep/src/com/android/quickstep/QuickstepProcessInitializer.java
++++ b/quickstep/src/com/android/quickstep/QuickstepProcessInitializer.java
+@@ -21,7 +21,6 @@ import android.content.pm.PackageManager;
+ import android.os.Build;
+ import android.os.UserManager;
+ import android.util.Log;
+-import android.graphics.ImageDecoder;
+ 
+ import com.android.launcher3.BuildConfig;
+ import com.android.launcher3.MainProcessInitializer;
+@@ -65,15 +64,4 @@ public class QuickstepProcessInitializer extends MainProcessInitializer {
+         ThreadedRendererCompat.setContextPriority(
+                 ThreadedRendererCompat.EGL_CONTEXT_PRIORITY_HIGH_IMG);
+     }
+-
+-    private void setupImageDecoder(Context context) {
+-        // Limit the max memory usage.
+-        int maxMemoryMb = context.getResources().getInteger(R.integer.max_launcher_memory_mb);
+-        long maxMemoryBytes = maxMemoryMb * 1024L * 1024L;
+-        // Get the allowed mime types from the resources.
+-        Set<String> allowedMimeTypes = Set.of(context.getResources().getStringArray(
+-                R.array.allowed_image_mime_types));
+-        ImageDecoder.setDefaultProcessListener(
+-                new LauncherProcessImageListener(maxMemoryBytes, allowedMimeTypes));
+-    }
+ }
+-- 
+2.47.3
+

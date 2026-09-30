@@ -1,0 +1,35 @@
+This is the patches-ul directory (lineage source changes for 19.1 port).
+
+Layout: one subdirectory per repo (path relative to the tree root),
+numbered .patch files inside (git format-patch format, apply from the repo root).
+
+Usage:
+
+    cd WORKING_DIR
+    sh device/xiaomi/mocha/patches-ul/install.sh     # apply all patches
+    sh device/xiaomi/mocha/patches-ul/uninstall.sh   # revert all patches
+    sh device/xiaomi/mocha/patches-ul/check.sh       # verify only (no apply)
+
+NOTE: uninstall.sh reverts via `git checkout -- . && git clean -df` in
+each listed repo (destructive: also removes untracked files). Back it up
+before running.
+
+Patches:
+
+  system/bt/                      BT RT scheduling FATAL->WARNING,
+                                  LDAC codec unavailable
+  system/libhidl/                 VINTF race log removal
+  frameworks/base/                biometric PromptInfo fix, MmsService
+                                  callingUser, SystemUI NPE guard,
+                                  ColorFade off, power Notifier NPE,
+                                  TelephonyPermissions isShell
+  external/dng_sdk/               Android.bp sdk_version removal
+  packages/apps/Trebuchet/        Quickstep setupImageDecoder removal
+
+All patches above are committed in their respective repos (local
+commits on top of upstream); the .patch files here are the persistent
+record and the means to re-apply on a fresh tree.
+
+NOTE: changes to this repo itself (device/xiaomi/mocha, e.g.
+system_prop.mk, BoardConfig.mk) are normal commits, not patches,
+and are pushed to the device repo remote directly.

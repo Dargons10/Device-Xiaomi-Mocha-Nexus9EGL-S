@@ -1,0 +1,34 @@
+From 421b618f3e37e18c0a30937f2880c5cae73291af Mon Sep 17 00:00:00 2001
+From: Dargons10 <jdamr2p@gmail.com>
+Date: Wed, 30 Sep 2026 22:17:06 +0200
+Subject: [PATCH] fix: power Notifier NPE crash on charging state change
+
+Settings.Global.getString() returns null when charging sound
+settings are unset (default). Uri.parse(null) throws
+NullPointerException, crashing system_server and causing
+a full reboot.
+
+Add null check before Uri.parse() in playChargingStartedFeedback().
+
+Co-authored-by: Qwen3.8-27B-local
+Signed-off-by: Opencode <opencode@opencode.ai>
+---
+ services/core/java/com/android/server/power/Notifier.java | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/services/core/java/com/android/server/power/Notifier.java b/services/core/java/com/android/server/power/Notifier.java
+index f62bea945f51..a9d8fe5d779f 100644
+--- a/services/core/java/com/android/server/power/Notifier.java
++++ b/services/core/java/com/android/server/power/Notifier.java
+@@ -840,7 +840,7 @@ public class Notifier {
+         final String soundPath = Settings.Global.getString(mContext.getContentResolver(),
+                 wireless ? Settings.Global.WIRELESS_CHARGING_STARTED_SOUND
+                         : Settings.Global.CHARGING_STARTED_SOUND);
+-        if ("silent".equals(soundPath)) {
++        if (soundPath == null || "silent".equals(soundPath)) {
+             return;
+         }
+ 
+-- 
+2.47.3
+
