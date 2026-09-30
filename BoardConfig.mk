@@ -21,6 +21,9 @@ LOCAL_PATH := device/xiaomi/mocha
 # Allow duplicate rules to override them
 BUILD_BROKEN_DUP_RULES := true
 
+# Legacy device: allow duplicate sysprop assignments (first one wins)
+BUILD_BROKEN_DUP_SYSPROP := true
+
 # Audio
 USE_XML_AUDIO_POLICY_CONF := 1
 BOARD_USES_GENERIC_AUDIO := false
@@ -101,10 +104,14 @@ VSYNC_EVENT_PHASE_OFFSET_NS := 7500000
 
 # HIDL Manifest
 DEVICE_MANIFEST_FILE := $(LOCAL_PATH)/manifest.xml
-PRODUCT_ENFORCE_VINTF_MANIFEST_OVERRIDE := true
+PRODUCT_ENFORCE_VINTF_MANIFEST_OVERRIDE := false
 
 # Include
 TARGET_SPECIFIC_HEADER_PATH := $(LOCAL_PATH)/include
+
+# Vendor Init
+TARGET_INIT_VENDOR_LIB      := libinit_mocha
+TARGET_LIBINIT_DEFINES_FILE := $(LOCAL_PATH)/libmocha/init_mocha.cpp
 
 # Include an expanded selection of fonts
 EXTENDED_FONT_FOOTPRINT := true
@@ -117,6 +124,12 @@ BOARD_KERNEL_PAGESIZE := 2048
 BOARD_KERNEL_TAGS_OFFSET := 0x00000100
 TARGET_KERNEL_SOURCE := kernel/xiaomi/mocha
 TARGET_KERNEL_CONFIG := tegra12_android_defconfig
+# Tegra124 kernel (Linux 3.10) uses GCC-specific flags (-march=armv5t, -Wa,-mfpu=softvfp+vfp)
+# that Clang 12 does not support. Build the kernel with the GCC cross-compiler instead of Clang.
+TARGET_KERNEL_CLANG_COMPILE := false
+# Suppress -Werror in kernel sub-Makefiles: the GCC 4.9 cross-compiler emits
+# a spurious '-ftarget=arm-linux-gnu' warning that -Werror promotes to an error.
+TARGET_KERNEL_ADDITIONAL_FLAGS := CFLAGS_KERNEL="-Wno-error"
 BOARD_KERNEL_IMAGE_NAME := zImage
 BOARD_KERNEL_SEPARATED_DT := true
 BOARD_MKBOOTIMG_ARGS := --ramdisk_offset $(BOARD_RAMDISK_OFFSET) --tags_offset $(BOARD_KERNEL_TAGS_OFFSET)
