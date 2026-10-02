@@ -48,7 +48,7 @@
 
 <AudioConfigs>
   <alsa_device name="music"
-               card_id="1"
+               card_id="-1"
                card_name="tegrart5671"
                device_id="0">
     <pcm_config rate="48000"
@@ -109,9 +109,11 @@
           <ctl name="DAC L2 Mux" val="IF1 DAC" mode="AUDIO_MODE_NORMAL"/>
           <ctl name="DAC L2 Mux" val="TxDC DAC" mode="AUDIO_MODE_IN_COMMUNICATION"/>
           <ctl name="DAC R2 Mux" val="IF1 DAC" mode="AUDIO_MODE_NORMAL"/>
+          <ctl name="DAC R2 Mux" val="TxDC DAC" mode="AUDIO_MODE_IN_COMMUNICATION"/>
           <ctl name="DA MONOL ASRC Switch" val="clk_sysy_div_out" mode="AUDIO_MODE_NORMAL"/>
           <ctl name="DA MONOL ASRC Switch" val="clk_i2s1_track" mode="AUDIO_MODE_IN_COMMUNICATION"/>
           <ctl name="DA MONOR ASRC Switch" val="clk_sysy_div_out" mode="AUDIO_MODE_NORMAL"/>
+          <ctl name="DA MONOR ASRC Switch" val="clk_i2s1_track" mode="AUDIO_MODE_IN_COMMUNICATION"/>
           <ctl name="DAC2 Playback Volume" val="175"/>
           <ctl name="Mono DAC MIXL DAC L2 Switch" val="1"/>
           <ctl name="Mono DAC MIXR DAC L2 Switch" val="0" mode="AUDIO_MODE_NORMAL"/>
@@ -262,7 +264,7 @@
     </playback>
 
     <capture>
-      <pcm_config start_threshold="1"/>
+      <pcm_config rate="48000" channels="2" bps="16" start_threshold="1"/>
 
       <device name="builtin-mic">
         <path name="on">
@@ -398,13 +400,32 @@
           <ctl name="Stereo1 ADC1 Mux" val="ADC"/>
           <ctl name="Stereo1 ADC Mux" val="ADC1L ADC2R"/>
           <ctl name="ADC 1_2" val="Stereo DAC"/>
+          <ctl name="DAC1 L Mux" val="IF1 DAC"/>
+          <ctl name="DAC1 R Mux" val="IF1 DAC"/>
+          <ctl name="DA STO ASRC Switch" val="clk_sysy_div_out"/>
+          <ctl name="DAC1 MIXL DAC1 Switch" val="1"/>
+          <ctl name="DAC1 MIXR DAC1 Switch" val="1"/>
+          <ctl name="Stereo DAC MIXL DAC L1 Switch" val="1"/>
+          <ctl name="Stereo DAC MIXR DAC R1 Switch" val="1"/>
+          <ctl name="HPO MIX DAC1 Switch" val="1"/>
+          <stream name="input" dir="in">
+            <device name="DAC" type="AUDIO_DEVICE_IN_FM_TUNER" />
+            <channel mode="mono" />
+            <samplingrate rate="48000" />
+            <format type="pcm16" />
+          </stream>
+        </path>
+        <path name="off">
+          <ctl name="HPO MIX DAC1 Switch" val="0"/>
+          <ctl name="Stereo DAC MIXL DAC L1 Switch" val="0"/>
+          <ctl name="Stereo DAC MIXR DAC R1 Switch" val="0"/>
         </path>
       </device>
     </capture>
   </alsa_device>
 
   <alsa_device name ="aux"
-             card_id="0"
+             card_id="-1"
              card_name="Tegra"
              device_id="3">
     <pcm_config rate="48000"
@@ -422,7 +443,7 @@
     </playback>
   </alsa_device>
 
-<alsa_device name="wfd">
+  <alsa_device name="wfd">
     <pcm_config rate="48000"
                 channels="2"
                 bps="16"
@@ -431,5 +452,5 @@
     <playback>
       <device name="wfd"/>
     </playback>
-</alsa_device>
+  </alsa_device>
 </AudioConfigs>
