@@ -1,0 +1,37 @@
+From b4f8a06dd61a9ef62e3fbafa98df755275b08ee7 Mon Sep 17 00:00:00 2001
+From: Dargons10 <jdamr2p@gmail.com>
+Date: Fri, 2 Oct 2026 21:24:05 +0200
+Subject: [PATCH] health: isChargingModeSupported() null-guard when the HAL is
+ absent
+
+ChargingControlController's constructor evaluates TOGGLE/BYPASS/DEADLINE support
+before/on the same path as the "HAL not found" check, so on devices without the
+vendor.lineage.health HAL it called getSupportedMode() on a null binder and threw
+an NPE, aborting HealthInterfaceService.onStart (system_server WTF).
+
+Return false from isChargingModeSupported() when mChargingControl is null.
+
+Co-authored-by: Qwen3.8-27B-local
+Change-Id: I44b50de82f5d5a2f4126c1a336871c0f86e9e875
+Signed-off-by: Opencode <opencode@opencode.ai>
+---
+ .../platform/internal/health/ChargingControlController.java    | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/lineage/lib/main/java/org/lineageos/platform/internal/health/ChargingControlController.java b/lineage/lib/main/java/org/lineageos/platform/internal/health/ChargingControlController.java
+index 6b315531..45dd4a90 100644
+--- a/lineage/lib/main/java/org/lineageos/platform/internal/health/ChargingControlController.java
++++ b/lineage/lib/main/java/org/lineageos/platform/internal/health/ChargingControlController.java
+@@ -253,6 +253,9 @@ public class ChargingControlController extends LineageHealthFeature {
+     }
+ 
+     public boolean isChargingModeSupported(int mode) {
++        if (mChargingControl == null) {
++            return false;
++        }
+         try {
+             return (mChargingControl.getSupportedMode() & mode) != 0;
+         } catch (RemoteException e) {
+-- 
+2.47.3
+

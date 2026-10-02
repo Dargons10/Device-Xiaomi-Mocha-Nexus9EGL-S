@@ -25,6 +25,8 @@ Patches:
                                   TelephonyPermissions isShell
   external/dng_sdk/               Android.bp sdk_version removal
   packages/apps/Trebuchet/        Quickstep setupImageDecoder removal
+  packages/apps/Settings/         ButtonBarHandler null-guard (NetworkProviderSettings crash)
+  lineage-sdk/                    ChargingControl null-guard (vendor.lineage.health absent)
 
 All patches above are committed in their respective repos (local
 commits on top of upstream); the .patch files here are the persistent

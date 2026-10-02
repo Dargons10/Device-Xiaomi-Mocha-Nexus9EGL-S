@@ -1,7 +1,7 @@
 #!/bin/sh
 
 rootdirectory="$PWD"
-dirs="system/bt system/libhidl frameworks/base external/dng_sdk packages/apps/Trebuchet"
+dirs="system/bt system/libhidl frameworks/base external/dng_sdk packages/apps/Trebuchet packages/apps/Settings lineage-sdk"
 
 
 RED='\033[0;31m'
