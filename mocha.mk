@@ -141,7 +141,11 @@ PRODUCT_PACKAGES += \
     android.hardware.renderscript@1.0-impl \
     libs \
     libshim_zw \
-    libshim_atomic
+    libshim_atomic \
+    libmocha_omx \
+    libmocha_camera \
+    libmocha_libc \
+    libnvomxadaptor_shim
 
 #GO
 #$(call inherit-product, device/xiaomi/mocha/go_mocha.mk)
