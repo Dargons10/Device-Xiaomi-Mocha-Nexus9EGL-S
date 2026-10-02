@@ -143,8 +143,6 @@ PRODUCT_PACKAGES += \
     libshim_zw \
     libshim_atomic \
     libmocha_omx \
-    libmocha_camera \
-    libmocha_libc \
     libnvomxadaptor_shim
 
 #GO
