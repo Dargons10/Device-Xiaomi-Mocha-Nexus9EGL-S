@@ -67,7 +67,7 @@
 #define OUT_PERIOD_COUNT_DEFAULT 4
 #define OUT_CHANNEL_MASK_DEFAULT AUDIO_CHANNEL_OUT_STEREO
 #define OUT_CHANNEL_COUNT_DEFAULT 2
-#define OUT_RATE_DEFAULT 44100
+#define OUT_RATE_DEFAULT 48000
 
 #define IN_PERIOD_SIZE_DEFAULT 256
 #define IN_PERIOD_COUNT_DEFAULT 4
@@ -659,11 +659,11 @@ static unsigned int out_pcm_cfg_period_size(struct stream_out_pcm *out)
 
 static unsigned int out_pcm_cfg_rate(struct stream_out_pcm *out)
 {
-    if (out->common.hw->rate != 0) {
-        return out->common.hw->rate;
-    } else {
-        return OUT_RATE_DEFAULT;
-    }
+    /* The RT5671 codec on Tegra124 is clocked at a fixed 48000 Hz.
+     * Opening the PCM at any other rate makes the DAC resample under
+     * the hood and audio plays back at the wrong speed, so we always
+     * configure the output PCM for 48000 Hz. */
+    return 48000;
 }
 
 static unsigned int out_pcm_cfg_channel_count(struct stream_out_pcm *out)
