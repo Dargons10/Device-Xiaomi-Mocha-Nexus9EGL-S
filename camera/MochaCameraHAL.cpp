@@ -18,7 +18,10 @@
 #include <system/graphics.h>
 #include <system/camera_metadata.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <linux/videodev2.h>
+#include <sys/ioctl.h>
+#include <string.h>
 #include <sys/poll.h>
 #include <time.h>
 #include <signal.h>
@@ -52,6 +55,51 @@ const int MochaCameraHAL::kNumCameras = sizeof(MochaCameraHAL::kCameras) / sizeo
 
 // Static camera characteristics cache
 static camera_metadata_t* gCameraCharacteristics[2] = { nullptr, nullptr };
+
+// --- Dynamic camera presence detection -----------------------------------
+// The HAL table above is static, but a unit may be built with a sensor that
+// is not populated (e.g. OV5693 on some Mi Pad 1 boards answers I2C with
+// -ETIMEDOUT). Advertising an absent sensor produces a phantom camera that
+// crashes on open. We probe each V4L2 capture node once and only expose the
+// sensors that are actually present, remapping logical->physical camera ids.
+#define MOCHA_MAX_CAMERAS 8
+static bool gPresentPhys[MOCHA_MAX_CAMERAS] = { false };
+static int  gPhysIdForLogical[MOCHA_MAX_CAMERAS] = { 0 };
+static int  gNumPresent = -1;
+
+static bool probeCameraPresent(int physId) {
+    // Keep this path mapping in sync with CameraPipeline::open().
+    const char* devPath = (physId == 0) ? "/dev/video0" : "/dev/video1";
+    int fd = ::open(devPath, O_RDWR | O_NONBLOCK);
+    if (fd < 0) {
+        ALOGW("probe: cannot open %s (%s) -> sensor %d absent",
+              devPath, strerror(errno), physId);
+        return false;
+    }
+    struct v4l2_capability cap;
+    memset(&cap, 0, sizeof(cap));
+    bool ok = false;
+    if (ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0) {
+        ok = (cap.capabilities &
+              (V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_VIDEO_CAPTURE_MPLANE)) != 0;
+    }
+    ::close(fd);
+    if (!ok)
+        ALOGW("probe: %s exists but reports no capture capability -> absent", devPath);
+    return ok;
+}
+
+static void ensureCamerasProbed() {
+    if (gNumPresent >= 0) return;
+    int n = 0;
+    for (int i = 0; i < MochaCameraHAL::kNumCameras && n < MOCHA_MAX_CAMERAS; i++) {
+        bool p = probeCameraPresent(i);
+        gPresentPhys[i] = p;
+        if (p) gPhysIdForLogical[n++] = i;
+    }
+    gNumPresent = n;
+    ALOGI("camera probe: %d/%d sensors present", n, MochaCameraHAL::kNumCameras);
+}
 
 // Module callbacks
 static camera_module_callbacks_t gModuleCallbacks;
@@ -1847,12 +1895,15 @@ static int camera_device_flush(const camera3_device_t *device) {
 
 // Camera device open implementation
 int MochaCameraHAL::openCamera(int cameraId, hw_device_t **device) {
-    ALOGI("openCamera: cameraId=%d", cameraId);
+    ensureCamerasProbed();
+    ALOGI("openCamera: logicalId=%d", cameraId);
 
-    if (cameraId < 0 || cameraId >= MochaCameraHAL::kNumCameras) {
+    if (cameraId < 0 || cameraId >= gNumPresent) {
         ALOGE("Invalid camera ID: %d", cameraId);
         return -EINVAL;
     }
+
+    int physId = gPhysIdForLogical[cameraId];
 
     int ret = camera_device_init(&::HMI.common, device);
     if (ret != 0) {
@@ -1861,9 +1912,9 @@ int MochaCameraHAL::openCamera(int cameraId, hw_device_t **device) {
     }
 
     mocha_camera_device_t *dev = (mocha_camera_device_t *)*device;
-    dev->camera_id = cameraId;
+    dev->camera_id = physId;
 
-    ALOGI("Camera %d opened successfully", cameraId);
+    ALOGI("Camera opened successfully: logical=%d phys=%d", cameraId, physId);
     return 0;
 }
 
@@ -1873,26 +1924,30 @@ namespace mocha {
 
 // Implementation of MochaCameraHAL
 /*static*/ int MochaCameraHAL::getNumberOfCameras() {
-    ALOGI("getNumberOfCameras: %d", MochaCameraHAL::kNumCameras);
-    return MochaCameraHAL::kNumCameras;
+    ensureCamerasProbed();
+    ALOGI("getNumberOfCameras: %d", gNumPresent);
+    return gNumPresent;
 }
 
 /*static*/ int MochaCameraHAL::getCameraInfo(int cameraId, struct camera_info *info) {
-    if (cameraId < 0 || cameraId >= MochaCameraHAL::kNumCameras) {
+    ensureCamerasProbed();
+    if (cameraId < 0 || cameraId >= gNumPresent) {
         ALOGE("Invalid camera ID: %d", cameraId);
         return -EINVAL;
     }
 
-    const MochaCameraInfo& cam = MochaCameraHAL::kCameras[cameraId];
+    int physId = gPhysIdForLogical[cameraId];
+    const MochaCameraInfo& cam = MochaCameraHAL::kCameras[physId];
     info->facing = cam.facing;
     info->orientation = cam.orientation;
     info->device_version = CAMERA_DEVICE_API_VERSION_3_2;
-    info->static_camera_characteristics = init_static_characteristics(cameraId);
+    info->static_camera_characteristics = init_static_characteristics(physId);
     info->resource_cost = 100;
     info->conflicting_devices = nullptr;
     info->conflicting_devices_length = 0;
 
-    ALOGI("Camera info: id=%d, facing=%d, orientation=%d", cameraId, info->facing, info->orientation);
+    ALOGI("Camera info: logical=%d phys=%d facing=%d orientation=%d",
+          cameraId, physId, info->facing, info->orientation);
 
     return 0;
 }
