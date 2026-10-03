@@ -21,6 +21,12 @@ PRODUCT_PROPERTY_OVERRIDES += \
     persist.vendor.bt.a2dp_offload_cap=sbc-aptx-aptxtws-aptxhd-aac-ldac \
     persist.vendor.btstack.a2dp_offload_cap=sbc-aptx-aptxtws-aptxhd-aac-ldacs
 
+# BPF (TEMPORAL: mantener hasta portar compatibilidad bpfloader A12
+# renameat2/clsact/obj-ids desde serie smartisan sfo; al quitar esto
+# otra vez, bpfloader CRITICAL-falla y init hace reboot_on_failure)
+PRODUCT_PROPERTY_OVERRIDES += \
+    ro.kernel.ebpf.supported=false
+
 # BT
 PRODUCT_PROPERTY_OVERRIDES += \
     ro.bt.bdaddr_path=/data/mocha_btmacaddr.txt
