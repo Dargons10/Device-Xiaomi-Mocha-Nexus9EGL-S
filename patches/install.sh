@@ -4,7 +4,7 @@ echo $1
 rootdirectory="$PWD"
 # ---------------------------------
 
-dirs="bionic/libm frameworks/native frameworks/av frameworks/base hardware/interfaces hardware/lineage/interfaces system/extras system/core packages/apps/Camera2 packages/apps/Gallery2 hardware/nvidia/hwcomposer hardware/broadcom/wlan system/memory/lmkd system/netd system/connectivity/wificond system/sepolicy system/bt vendor/lineage"
+dirs="bionic/libm frameworks/native frameworks/av frameworks/base hardware/interfaces hardware/lineage/interfaces system/extras system/core packages/apps/Camera2 packages/apps/Gallery2 hardware/nvidia/hwcomposer hardware/broadcom/wlan hardware/broadcom/fm hardware/broadcom/libbt system/memory/lmkd system/netd system/connectivity/wificond system/sepolicy system/bt vendor/lineage"
 
 # red + nocolor
 RED='\033[0;31m'

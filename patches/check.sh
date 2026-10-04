@@ -1,7 +1,7 @@
 #!/bin/sh
 
 rootdirectory="$PWD"
-dirs="bionic/libm frameworks/native frameworks/av system/core system/extras"
+dirs="bionic/libm frameworks/native frameworks/av system/core system/extras hardware/broadcom/fm hardware/broadcom/libbt"
 
 
 RED='\033[0;31m'

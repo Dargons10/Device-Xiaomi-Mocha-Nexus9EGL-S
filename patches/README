@@ -31,6 +31,11 @@ Patches:
   packages/apps/Gallery2/          video debug logging
   hardware/nvidia/hwcomposer/      Tegra build fixes
   hardware/broadcom/wlan/          wifi_hal use-after-free guard
+  hardware/broadcom/fm/            FM libs buildable with the shared
+                                   Broadcom BT/FM transport (non-proprietary,
+                                   /system/lib)
+  hardware/broadcom/libbt/         libbt-vendor BRCM_SHARED_TRANSPORT mode
+                                   (UIM owns power/firmware/LPM)
   system/memory/lmkd/              workingset_refault counter wrap
   system/netd/                     NFLOG group removal
   system/connectivity/wificond/    BCM4350 ext-features log level

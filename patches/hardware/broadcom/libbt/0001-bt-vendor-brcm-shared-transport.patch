@@ -1,0 +1,116 @@
+diff --git a/Android.mk b/Android.mk
+index ceb2793..3dcb4d7 100644
+--- a/Android.mk
++++ b/Android.mk
+@@ -43,6 +43,10 @@ LOCAL_C_INCLUDES += \
+ LOCAL_C_INCLUDES += $(bdroid_C_INCLUDES)
+ LOCAL_CFLAGS += $(bdroid_CFLAGS)
+ 
++ifeq ($(BOARD_BLUETOOTH_USE_BRCM_SHARED_TRANSPORT),true)
++LOCAL_CFLAGS += -DBRCM_SHARED_TRANSPORT
++endif
++
+ LOCAL_HEADER_LIBRARIES := libutils_headers
+ 
+ ifneq ($(BOARD_HAVE_BLUETOOTH_BCM_A2DP_OFFLOAD),)
+@@ -54,13 +58,16 @@ LOCAL_SHARED_LIBRARIES := \
+         liblog
+ 
+ LOCAL_MODULE := libbt-vendor
+-LOCAL_LICENSE_KINDS := SPDX-license-identifier-Apache-2.0
+-LOCAL_LICENSE_CONDITIONS := notice
+ LOCAL_MODULE_TAGS := optional
+ LOCAL_MODULE_CLASS := SHARED_LIBRARIES
+ LOCAL_MODULE_OWNER := broadcom
+ LOCAL_PROPRIETARY_MODULE := true
+ 
++ifeq ($(BOARD_HAVE_SAMSUNG_BLUETOOTH),true)
++    LOCAL_CFLAGS += -DSAMSUNG_BLUETOOTH
++    LOCAL_C_INCLUDES += hardware/samsung/macloader/include
++endif
++
+ include $(LOCAL_PATH)/vnd_buildcfg.mk
+ 
+ include $(BUILD_SHARED_LIBRARY)
+diff --git a/src/bt_vendor_brcm.c b/src/bt_vendor_brcm.c
+index d95c398..9dd28d4 100644
+--- a/src/bt_vendor_brcm.c
++++ b/src/bt_vendor_brcm.c
+@@ -150,6 +150,10 @@ static int op(bt_vendor_opcode_t opcode, void *param)
+     {
+         case BT_VND_OP_POWER_CTRL:
+             {
++#ifdef BRCM_SHARED_TRANSPORT
++                /* UIM controls power for both radios; BT off must not kill FM. */
++                (void)param;
++#else
+                 int *state = (int *) param;
+                 upio_set_bluetooth_power(UPIO_BT_POWER_OFF);
+                 if (*state == BT_VND_PWR_ON)
+@@ -163,12 +167,18 @@ static int op(bt_vendor_opcode_t opcode, void *param)
+                     /* Make sure wakelock is released */
+                     hw_lpm_set_wake_state(false);
+                 }
++#endif
+             }
+             break;
+ 
+         case BT_VND_OP_FW_CFG:
+             {
++#ifdef BRCM_SHARED_TRANSPORT
++                /* Opening the char device waits for kernel firmware download. */
++                bt_vendor_cbacks->fwcfg_cb(BT_VND_OP_RESULT_SUCCESS);
++#else
+                 hw_config_start();
++#endif
+             }
+             break;
+ 
+@@ -214,7 +224,12 @@ static int op(bt_vendor_opcode_t opcode, void *param)
+         case BT_VND_OP_LPM_SET_MODE:
+             {
+                 uint8_t *mode = (uint8_t *) param;
++#ifdef BRCM_SHARED_TRANSPORT
++                (void)mode;
++                bt_vendor_cbacks->lpm_cb(BT_VND_OP_RESULT_SUCCESS);
++#else
+                 retval = hw_lpm_enable(*mode);
++#endif
+             }
+             break;
+ 
+@@ -224,7 +239,9 @@ static int op(bt_vendor_opcode_t opcode, void *param)
+                 uint8_t wake_assert = (*state == BT_VND_LPM_WAKE_ASSERT) ? \
+                                         TRUE : FALSE;
+ 
++#ifndef BRCM_SHARED_TRANSPORT
+                 hw_lpm_set_wake_state(wake_assert);
++#endif
+             }
+             break;
+ 
+diff --git a/src/userial_vendor.c b/src/userial_vendor.c
+index fd8c7c8..2848b08 100644
+--- a/src/userial_vendor.c
++++ b/src/userial_vendor.c
+@@ -193,6 +193,12 @@ void userial_vendor_init(void)
+ *******************************************************************************/
+ int userial_vendor_open(tUSERIAL_CFG *p_cfg)
+ {
++#ifdef BRCM_SHARED_TRANSPORT
++    /* UIM configures the physical UART. This node multiplexes HCI with FM. */
++    (void)p_cfg;
++    vnd_userial.fd = open(vnd_userial.port_name, O_RDWR);
++    return vnd_userial.fd;
++#else
+     uint32_t baud;
+     uint8_t data_bits;
+     uint16_t parity;
+@@ -273,6 +279,7 @@ int userial_vendor_open(tUSERIAL_CFG *p_cfg)
+     ALOGI("device fd = %d open", vnd_userial.fd);
+ 
+     return vnd_userial.fd;
++#endif
+ }
+ 
+ /*******************************************************************************

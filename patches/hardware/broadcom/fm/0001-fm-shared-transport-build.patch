@@ -1,0 +1,31 @@
+diff --git a/fmradio.v4l2-fm/Android.mk b/fmradio.v4l2-fm/Android.mk
+index 5287592..73e2d1d 100644
+--- a/fmradio.v4l2-fm/Android.mk
++++ b/fmradio.v4l2-fm/Android.mk
+@@ -9,6 +9,10 @@ LOCAL_MODULE_TAG := optional
+ LOCAL_SHARED_LIBRARIES := liblog
+ LOCAL_SRC_FILES := v4l2_fm.c v4l2_ioctl.c
+ LOCAL_MODULE_OWNER := sony
++ifeq ($(BOARD_BLUETOOTH_USE_BRCM_SHARED_TRANSPORT),true)
++LOCAL_PROPRIETARY_MODULE := false
++else
+ LOCAL_PROPRIETARY_MODULE := true
++endif
+ 
+ include $(BUILD_SHARED_LIBRARY)
+diff --git a/libfmjni/Android.mk b/libfmjni/Android.mk
+index a846f93..c4b23a8 100644
+--- a/libfmjni/Android.mk
++++ b/libfmjni/Android.mk
+@@ -24,7 +24,11 @@ LOCAL_CFLAGS := \
+     -Wno-unused-function \
+ 
+ ifneq ($(strip $(TARGET_ARCH)),arm64)
++ifeq ($(BOARD_BLUETOOTH_USE_BRCM_SHARED_TRANSPORT),true)
++LIBRARY_PATH:="/system/lib/"
++else
+ LIBRARY_PATH:="/vendor/lib/"
++endif
+ LOCAL_CFLAGS+= -DLIBRARY_PATH=\"$(LIBRARY_PATH)\"
+ endif
+ 
