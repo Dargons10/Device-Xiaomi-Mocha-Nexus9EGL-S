@@ -16,7 +16,8 @@ LOCAL_SHARED_LIBRARIES := \
     libutils \
     libcutils \
     libcamera_metadata \
-    libjpeg
+    libjpeg \
+    libsync
 
 LOCAL_C_INCLUDES := \
     system/core/include \

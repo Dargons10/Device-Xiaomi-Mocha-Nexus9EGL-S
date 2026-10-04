@@ -32,6 +32,7 @@
 #include <atomic>
 #include <mutex>
 #include <unistd.h>
+#include <sync/sync.h>
 
 #include "MochaCameraHAL.h"
 #include "CameraPipeline.h"
@@ -47,7 +48,7 @@ namespace mocha {
 
 // Camera configurations
 const MochaCameraInfo MochaCameraHAL::kCameras[] = {
-    { 0, "IMX179", CAMERA_FACING_BACK, 90, 3280, false },
+    { 0, "IMX179", CAMERA_FACING_BACK, 90, 3264, false },
     { 1, "OV5693", CAMERA_FACING_FRONT, 270, 2592, false },
 };
 
@@ -332,35 +333,32 @@ static camera_metadata_t* init_static_characteristics(int cameraId) {
     int32_t configs[] = {
         HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED, 1280, 720, CAMERA3_STREAM_OUTPUT,
         HAL_PIXEL_FORMAT_YCbCr_420_888, 1280, 720, CAMERA3_STREAM_OUTPUT,
-        HAL_PIXEL_FORMAT_YV12, 1280, 720, CAMERA3_STREAM_OUTPUT,
         HAL_PIXEL_FORMAT_BLOB, 1280, 720, CAMERA3_STREAM_OUTPUT,
-        HAL_PIXEL_FORMAT_BLOB, 1920, 1080, CAMERA3_STREAM_OUTPUT,
-        HAL_PIXEL_FORMAT_BLOB, 3280, 2464, CAMERA3_STREAM_OUTPUT,
+        HAL_PIXEL_FORMAT_BLOB, cameraId == 0 ? 1920 : 1280, cameraId == 0 ? 1080 : 720, CAMERA3_STREAM_OUTPUT,
+        HAL_PIXEL_FORMAT_BLOB, cameraId == 0 ? 3264 : 1280, cameraId == 0 ? 2448 : 720, CAMERA3_STREAM_OUTPUT,
     };
-    add_camera_metadata_entry(metadata, ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS, configs, sizeof(configs)/sizeof(int32_t));
+    add_camera_metadata_entry(metadata, ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS, configs, cameraId == 0 ? sizeof(configs)/sizeof(int32_t) : 16);
 
     // Available min frame durations
     int64_t durations[] = {
         HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED, 1280, 720, 33333333LL,
         HAL_PIXEL_FORMAT_YCbCr_420_888, 1280, 720, 33333333LL,
-        HAL_PIXEL_FORMAT_YV12, 1280, 720, 33333333LL,
         HAL_PIXEL_FORMAT_BLOB, 1280, 720, 500000000LL,
-        HAL_PIXEL_FORMAT_BLOB, 1920, 1080, 500000000LL,
-        HAL_PIXEL_FORMAT_BLOB, 3280, 2464, 500000000LL,
+        HAL_PIXEL_FORMAT_BLOB, cameraId == 0 ? 1920 : 1280, cameraId == 0 ? 1080 : 720, 500000000LL,
+        HAL_PIXEL_FORMAT_BLOB, cameraId == 0 ? 3264 : 1280, cameraId == 0 ? 2448 : 720, 500000000LL,
     };
-    int ret = add_camera_metadata_entry(metadata, ANDROID_SCALER_AVAILABLE_MIN_FRAME_DURATIONS, durations, sizeof(durations)/sizeof(int64_t));
+    int ret = add_camera_metadata_entry(metadata, ANDROID_SCALER_AVAILABLE_MIN_FRAME_DURATIONS, durations, cameraId == 0 ? sizeof(durations)/sizeof(int64_t) : 16);
     ALOGI("DEBUG: Added min frame durations, ret=%d", ret);
 
     // Available stall durations (format, width, height, stall_ns)
     int64_t stall_durations[] = {
         HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED, 1280, 720, 0,
         HAL_PIXEL_FORMAT_YCbCr_420_888, 1280, 720, 0,
-        HAL_PIXEL_FORMAT_YV12, 1280, 720, 0,
         HAL_PIXEL_FORMAT_BLOB, 1280, 720, 500000000LL,
-        HAL_PIXEL_FORMAT_BLOB, 1920, 1080, 500000000LL,
-        HAL_PIXEL_FORMAT_BLOB, 3280, 2464, 500000000LL,
+        HAL_PIXEL_FORMAT_BLOB, cameraId == 0 ? 1920 : 1280, cameraId == 0 ? 1080 : 720, 500000000LL,
+        HAL_PIXEL_FORMAT_BLOB, cameraId == 0 ? 3264 : 1280, cameraId == 0 ? 2448 : 720, 500000000LL,
     };
-    add_camera_metadata_entry(metadata, ANDROID_SCALER_AVAILABLE_STALL_DURATIONS, stall_durations, sizeof(stall_durations)/sizeof(int64_t));
+    add_camera_metadata_entry(metadata, ANDROID_SCALER_AVAILABLE_STALL_DURATIONS, stall_durations, cameraId == 0 ? sizeof(stall_durations)/sizeof(int64_t) : 16);
 
     // Available processed sizes (for CameraWrapper synthesis of YUV_420_888)
     int32_t processed_sizes[] = {
@@ -371,10 +369,10 @@ static camera_metadata_t* init_static_characteristics(int cameraId) {
     // Available JPEG sizes (for CameraWrapper synthesis)
     int32_t jpeg_sizes[] = {
         1280, 720,
-        1920, 1080,
-        3280, 2464,
+        cameraId == 0 ? 1920 : 1280, cameraId == 0 ? 1080 : 720,
+        cameraId == 0 ? 3264 : 1280, cameraId == 0 ? 2448 : 720,
     };
-    add_camera_metadata_entry(metadata, ANDROID_SCALER_AVAILABLE_JPEG_SIZES, jpeg_sizes, sizeof(jpeg_sizes)/sizeof(int32_t));
+    add_camera_metadata_entry(metadata, ANDROID_SCALER_AVAILABLE_JPEG_SIZES, jpeg_sizes, cameraId == 0 ? sizeof(jpeg_sizes)/sizeof(int32_t) : 2);
 
     // Max digital zoom
     float max_digital_zoom = 4.0f;
@@ -388,7 +386,7 @@ static camera_metadata_t* init_static_characteristics(int cameraId) {
 
     // Sensor info
     int32_t sensor_width = cam.maxResolution;
-    int32_t sensor_height = (cameraId == 0) ? 2464 : 1456;
+    int32_t sensor_height = (cameraId == 0) ? 2448 : 1944;
     add_camera_metadata_entry(metadata, ANDROID_SENSOR_INFO_ACTIVE_ARRAY_SIZE, (int32_t[]){0, 0, sensor_width, sensor_height}, 4);
     add_camera_metadata_entry(metadata, ANDROID_SENSOR_INFO_PIXEL_ARRAY_SIZE, (int32_t[]){sensor_width, sensor_height}, 2);
     add_camera_metadata_entry(metadata, ANDROID_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE, (int32_t[]){0, 0, sensor_width, sensor_height}, 4);
@@ -484,7 +482,8 @@ static camera_metadata_t* init_static_characteristics(int cameraId) {
         ANDROID_CONTROL_AF_MODE_AUTO,
         ANDROID_CONTROL_AF_MODE_CONTINUOUS_PICTURE,
     };
-    add_camera_metadata_entry(metadata, ANDROID_CONTROL_AF_AVAILABLE_MODES, af_modes, sizeof(af_modes)/sizeof(uint8_t));
+    add_camera_metadata_entry(metadata, ANDROID_CONTROL_AF_AVAILABLE_MODES, af_modes,
+                              cameraId == 0 ? sizeof(af_modes)/sizeof(uint8_t) : 1);
 
     // Available AWB modes (required by deriveCameraCharacteristicsKeys)
     uint8_t awb_modes[] = {
@@ -595,7 +594,7 @@ static camera_metadata_t* init_static_characteristics(int cameraId) {
     add_camera_metadata_entry(metadata, ANDROID_SENSOR_MAX_ANALOG_SENSITIVITY, &max_analog_sensitivity, 1);
 
     // JPEG max size (required)
-    int32_t jpeg_max_size = 3280 * 2464 * 2;
+    int32_t jpeg_max_size = (cameraId == 0 ? 3264 * 2448 : 1280 * 720) * 2;
     add_camera_metadata_entry(metadata, ANDROID_JPEG_MAX_SIZE, &jpeg_max_size, 1);
 
     // Pipeline max depth (required)
@@ -818,7 +817,8 @@ static int camera_device_init(const hw_module_t *module, hw_device_t **device) {
     dev->jpeg_encoder = nullptr;
     dev->temp_rgba = nullptr;
     dev->temp_rgba_size = 0;
-    dev->af_mode = ANDROID_CONTROL_AF_MODE_CONTINUOUS_PICTURE;
+    dev->af_mode = dev->camera_id == 0 ? ANDROID_CONTROL_AF_MODE_CONTINUOUS_PICTURE
+                                         : ANDROID_CONTROL_AF_MODE_OFF;
     dev->af_trigger = ANDROID_CONTROL_AF_TRIGGER_IDLE;
     dev->af_trigger_handled = false;
     dev->af_auto_scanned = false;
@@ -949,6 +949,20 @@ static int camera_device_configure_streams(const camera3_device_t *device, camer
     
     // If we found RGBA/IMPLEMENTATION_DEFINED, use that as pipeline stream
     if (rgbaStream) pipelineStream = rgbaStream;
+
+    if (!pipelineStream) pipelineStream = const_cast<camera3_stream_t*>(blobStream);
+    if (!pipelineStream) return -EINVAL;
+    // Every reconfiguration returns format/usage, even if capture mode is unchanged.
+    for (uint32_t i = 0; i < config->num_streams; ++i) {
+        camera3_stream_t* stream = config->streams[i];
+        if (stream->format == HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED)
+            stream->format = HAL_PIXEL_FORMAT_RGBA_8888;
+        stream->usage |= GRALLOC_USAGE_SW_WRITE_OFTEN;
+        // Tegra gralloc accepts flexible YUV only for camera allocations.
+        // Without this flag it rejects format 35 with EINVAL.
+        if (stream->format == HAL_PIXEL_FORMAT_YCbCr_420_888)
+            stream->usage |= GRALLOC_USAGE_HW_CAMERA_WRITE;
+    }
 
     // Early exit if same resolution - avoids costly STREAMOFF/STREAMON cycle
     if (dev->last_config_width == pipelineStream->width &&
@@ -1134,7 +1148,8 @@ static const camera_metadata_t* camera_device_construct_default_request_settings
     add_camera_metadata_entry(metadata, ANDROID_CONTROL_AE_TARGET_FPS_RANGE, aeTargetFpsRange, 2);
     int32_t aePrecaptureTrigger = ANDROID_CONTROL_AE_PRECAPTURE_TRIGGER_IDLE;
     add_camera_metadata_entry(metadata, ANDROID_CONTROL_AE_PRECAPTURE_TRIGGER, &aePrecaptureTrigger, 1);
-    uint8_t afMode = ANDROID_CONTROL_AF_MODE_AUTO;
+    uint8_t afMode = cameraId == 0 ? ANDROID_CONTROL_AF_MODE_AUTO
+                                   : ANDROID_CONTROL_AF_MODE_OFF;
     add_camera_metadata_entry(metadata, ANDROID_CONTROL_AF_MODE, &afMode, 1);
     uint8_t afTrigger = ANDROID_CONTROL_AF_TRIGGER_IDLE;
     add_camera_metadata_entry(metadata, ANDROID_CONTROL_AF_TRIGGER, &afTrigger, 1);
@@ -1217,7 +1232,7 @@ static const camera_metadata_t* camera_device_construct_default_request_settings
     return metadata;
 }
 
-static camera_metadata_t* build_result_metadata(uint32_t frameNumber, int64_t timestamp, int64_t exposureNs, int32_t sensitivity, int afState, int focusPos, int64_t frameDurNs, uint8_t afMode) {
+static camera_metadata_t* build_result_metadata(uint32_t frameNumber, int64_t timestamp, int64_t exposureNs, int32_t sensitivity, int afState, int focusPos, int64_t frameDurNs, uint8_t afMode, int cameraId) {
     camera_metadata_t* metadata = allocate_camera_metadata(30, 1024);
     if (!metadata) return nullptr;
 
@@ -1290,7 +1305,8 @@ static camera_metadata_t* build_result_metadata(uint32_t frameNumber, int64_t ti
     add_camera_metadata_entry(metadata, ANDROID_REQUEST_ID, &requestId, 1);
 
     /* ANDROID_SCALER_CROP_REGION - full sensor */
-    int32_t cropRegion[] = {0, 0, 3280, 2464};
+    int32_t cropRegion[] = {0, 0, cameraId == 0 ? 3264 : 2592,
+                            cameraId == 0 ? 2448 : 1944};
     add_camera_metadata_entry(metadata, ANDROID_SCALER_CROP_REGION, cropRegion, 4);
 
     /* ANDROID_SENSOR_EXPOSURE_TIME (ns, from measured line period) */
@@ -1371,51 +1387,35 @@ static const gralloc_module_t* get_gralloc_module() {
     return cached;
 }
 
-static uint8_t* upscaleRGBA(const uint8_t* src, int srcW, int srcH, int dstW, int dstH, size_t* dstSize) {
-    size_t dstBufSize = (size_t)dstW * dstH * 4;
-    uint8_t* dst = (uint8_t*)malloc(dstBufSize);
-    if (!dst) return nullptr;
-    *dstSize = dstBufSize;
-    for (int y = 0; y < dstH; y++) {
-        int srcY = (y * srcH) / dstH;
-        for (int x = 0; x < dstW; x++) {
-            int srcX = (x * srcW) / dstW;
-            memcpy(dst + ((size_t)(y * dstW + x)) * 4, src + ((size_t)(srcY * srcW + srcX)) * 4, 4);
-        }
-    }
-    return dst;
-}
-
-static void insertExifApp1(uint8_t* jpeg, size_t* jpegSize, int width, int height) {
-    if (*jpegSize < 2 || jpeg[0] != 0xFF || jpeg[1] != 0xD8) return;
-    // Build EXIF APP1 segment (48 bytes total: 2 marker + 2 length + 44 payload)
-    uint8_t exif[48];
-    int p = 0;
-    exif[p++] = 0xFF; exif[p++] = 0xE1;
-    exif[p++] = 0x2E; exif[p++] = 0x00;
-    exif[p++] = 'E'; exif[p++] = 'x'; exif[p++] = 'i'; exif[p++] = 'f';
-    exif[p++] = 0x00; exif[p++] = 0x00;
-    exif[p++] = 0x49; exif[p++] = 0x49; exif[p++] = 0x2A; exif[p++] = 0x00;
-    exif[p++] = 0x08; exif[p++] = 0x00; exif[p++] = 0x00; exif[p++] = 0x00;
-    exif[p++] = 0x02; exif[p++] = 0x00;
-    exif[p++] = 0x12; exif[p++] = 0x01; exif[p++] = 0x03; exif[p++] = 0x00;
-    exif[p++] = 0x01; exif[p++] = 0x00; exif[p++] = 0x00; exif[p++] = 0x00;
-    exif[p++] = width & 0xFF; exif[p++] = (width >> 8) & 0xFF; exif[p++] = 0x00; exif[p++] = 0x00;
-    exif[p++] = 0x13; exif[p++] = 0x01; exif[p++] = 0x03; exif[p++] = 0x00;
-    exif[p++] = 0x01; exif[p++] = 0x00; exif[p++] = 0x00; exif[p++] = 0x00;
-    exif[p++] = height & 0xFF; exif[p++] = (height >> 8) & 0xFF; exif[p++] = 0x00; exif[p++] = 0x00;
-    exif[p++] = 0x00; exif[p++] = 0x00; exif[p++] = 0x00; exif[p++] = 0x00;
-    // Use a temp buffer to avoid memmove corruption
-    size_t newSize = *jpegSize + 48;
-    uint8_t* tmp = (uint8_t*)malloc(newSize);
-    if (tmp) {
-        memcpy(tmp, jpeg, 2);
-        memcpy(tmp + 2, exif, 48);
-        memcpy(tmp + 50, jpeg + 2, *jpegSize - 2);
-        memcpy(jpeg, tmp, newSize);
-        free(tmp);
-        *jpegSize = newSize;
-    }
+static void insertExifApp1(uint8_t* jpeg, size_t* jpegSize, size_t capacity,
+                           int width, int height, int rotation) {
+    // APP1 length is big endian; TIFF entries below use little endian.
+    uint8_t exif[78] = {};
+    if (*jpegSize < 2 || jpeg[0] != 0xff || jpeg[1] != 0xd8 ||
+        *jpegSize > capacity || capacity - *jpegSize < sizeof(exif)) return;
+    exif[0] = 0xff; exif[1] = 0xe1; exif[3] = sizeof(exif) - 2;
+    memcpy(exif + 4, "Exif", 4);
+    uint8_t* tiff = exif + 10;
+    tiff[0] = 'I'; tiff[1] = 'I'; tiff[2] = 42; tiff[4] = 8;
+    auto put32 = [](uint8_t* dst, uint32_t value) {
+        for (int i = 0; i < 4; ++i) dst[i] = value >> (8 * i);
+    };
+    auto entry = [&](uint8_t* dst, uint16_t tag, uint16_t type, uint32_t value) {
+        dst[0] = tag; dst[1] = tag >> 8;
+        dst[2] = type; dst[3] = type >> 8;
+        put32(dst + 4, 1); put32(dst + 8, value);
+    };
+    const uint32_t orientation = rotation == 90 ? 6 : rotation == 180 ? 3 :
+                                 rotation == 270 ? 8 : 1;
+    tiff[8] = 2;
+    entry(tiff + 10, 0x0112, 3, orientation);
+    entry(tiff + 22, 0x8769, 4, 38);
+    tiff[38] = 2;
+    entry(tiff + 40, 0xa002, 4, width);
+    entry(tiff + 52, 0xa003, 4, height);
+    memmove(jpeg + 2 + sizeof(exif), jpeg + 2, *jpegSize - 2);
+    memcpy(jpeg + 2, exif, sizeof(exif));
+    *jpegSize += sizeof(exif);
 }
 
 static int camera_device_process_capture_request(const camera3_device_t *device, camera3_capture_request_t *request) {
@@ -1480,7 +1480,8 @@ static int camera_device_process_capture_request(const camera3_device_t *device,
         ALOGI("AF request: mode=%d trigger=%d focusDist=%.2f", dev->af_mode, dev->af_trigger, focusDist);
     }
 
-    if (dev->pipeline) {
+    if (dev->camera_id != 0) dev->af_mode = ANDROID_CONTROL_AF_MODE_OFF;
+    if (dev->pipeline && dev->camera_id == 0) {
         mocha::CameraPipeline* p = static_cast<mocha::CameraPipeline*>(dev->pipeline);
         if (dev->af_mode == ANDROID_CONTROL_AF_MODE_AUTO ||
             dev->af_mode == ANDROID_CONTROL_AF_MODE_CONTINUOUS_PICTURE) {
@@ -1523,6 +1524,8 @@ static int camera_device_process_capture_request(const camera3_device_t *device,
     }
 
     bool frameCaptured = false;
+    bool streamFrameCaptured = false;
+    std::vector<uint8_t> bufferCaptured(request->num_output_buffers, 0);
     bool hasBlobOutput = false;
 
     if (dev->closing) {
@@ -1554,9 +1557,17 @@ static int camera_device_process_capture_request(const camera3_device_t *device,
 
                 buffer_handle_t handle = *outBuf.buffer;
                 void* vaddr = nullptr;
+                bool outputCaptured = false;
 
                 int fence = outBuf.acquire_fence;
-                if (fence >= 0) close(fence);
+                if (fence >= 0) {
+                    int waitRet = sync_wait(fence, 3000);
+                    close(fence);
+                    if (waitRet < 0) {
+                        ALOGE("Output acquire fence wait failed: %s", strerror(errno));
+                        continue;
+                    }
+                }
 
                 ALOGI("Processing output %u: frame=%llu stream=%dx%d format=%d",
                       i, (unsigned long long)request->frame_number,
@@ -1566,7 +1577,7 @@ static int camera_device_process_capture_request(const camera3_device_t *device,
                     hasBlobOutput = true;
                     uint32_t blobW = outBuf.stream->width;
                     uint32_t blobH = outBuf.stream->height;
-                    uint32_t rgbaSize = dev->pipeline_width * dev->pipeline_height * 4;
+                    uint32_t rgbaSize = blobW * blobH * 4;
                     if (!dev->temp_rgba || dev->temp_rgba_size < rgbaSize) {
                         if (dev->temp_rgba) free(dev->temp_rgba);
                         dev->temp_rgba = (uint8_t*)malloc(rgbaSize);
@@ -1575,29 +1586,12 @@ static int camera_device_process_capture_request(const camera3_device_t *device,
                     if (!dev->temp_rgba) {
                         ALOGE("Failed to allocate temp RGBA buffer");
                     } else {
-                        int captureRet = pipeline->captureFrame(dev->temp_rgba, HAL_PIXEL_FORMAT_RGBA_8888);
+                        int captureRet = pipeline->captureStill(dev->temp_rgba, blobW, blobH);
+                        // Still capture can replace ISP storage when restoring preview.
+                        streamFrameCaptured = false;
                         if (captureRet == 0) {
                             uint8_t* encodeSrc = dev->temp_rgba;
-                            int encodeW = dev->pipeline_width;
-                            int encodeH = dev->pipeline_height;
-                            uint8_t* upscaled = nullptr;
-                            ALOGI("BLOB: blob=%ux%u pipeline=%ux%u needUpscale=%d",
-                                  blobW, blobH, dev->pipeline_width, dev->pipeline_height,
-                                  (blobW != dev->pipeline_width || blobH != dev->pipeline_height));
-                            if (blobW != dev->pipeline_width || blobH != dev->pipeline_height) {
-                                size_t upSize = 0;
-                                upscaled = upscaleRGBA(dev->temp_rgba,
-                                                       dev->pipeline_width, dev->pipeline_height,
-                                                       blobW, blobH, &upSize);
-                                ALOGI("BLOB: upscale result=%p", (void*)upscaled);
-                                if (upscaled) {
-                                    encodeSrc = upscaled;
-                                    encodeW = blobW;
-                                    encodeH = blobH;
-                                    ALOGI("Upscaled %dx%d -> %dx%d for JPEG",
-                                          dev->pipeline_width, dev->pipeline_height, blobW, blobH);
-                                }
-                            }
+                            int encodeW = blobW, encodeH = blobH;
                             run_guarded([&]() {
                                 int ret = grallocModule->lock(grallocModule, handle,
                                                                GRALLOC_USAGE_SW_WRITE_OFTEN,
@@ -1610,18 +1604,30 @@ static int camera_device_process_capture_request(const camera3_device_t *device,
                                     dev->jpeg_encoder = new mocha::JpegEncoder();
                                 }
                                 size_t jpegSize = 0;
-                                uint32_t blobSize = blobW * blobH * 2;
+                                // Match Camera3Device::getJpegBufferSize() in Android 10.
+                                const uint32_t maxArea = dev->camera_id == 0 ? 3264 * 2448 : 1280 * 720;
+                                const uint32_t minSize = 256 * 1024 + sizeof(camera3_jpeg_blob_t);
+                                const float scale = float(blobW * blobH) / maxArea;
+                                const uint32_t blobSize = scale * (maxArea * 2 - minSize) + minSize;
                                 ret = dev->jpeg_encoder->encodeRGBA(encodeSrc,
                                                                      encodeW, encodeH,
-                                                                     90, (uint8_t*)vaddr, blobSize, &jpegSize);
+                                                                     90, (uint8_t*)vaddr, blobSize - sizeof(camera3_jpeg_blob_t), &jpegSize);
                                 if (ret == 0 && jpegSize > 0) {
-                                    // EXIF insertion disabled: corrupts JPEG in gralloc BLOB buffer
+                                    int rotation = 0;
+                                    camera_metadata_ro_entry_t orientationEntry;
+                                    if (request->settings && find_camera_metadata_ro_entry(
+                                            request->settings, ANDROID_JPEG_ORIENTATION,
+                                            &orientationEntry) == 0 && orientationEntry.count)
+                                        rotation = orientationEntry.data.i32[0];
+                                    insertExifApp1((uint8_t*)vaddr, &jpegSize,
+                                                   blobSize - sizeof(camera3_jpeg_blob_t),
+                                                   encodeW, encodeH, rotation);
                                     camera3_jpeg_blob_t blob;
                                     blob.jpeg_blob_id = CAMERA3_JPEG_BLOB_ID;
                                     blob.jpeg_size = jpegSize;
                                     uint8_t* blobPtr = (uint8_t*)vaddr + blobSize - sizeof(blob);
                                     memcpy(blobPtr, &blob, sizeof(blob));
-                                    frameCaptured = true;
+                                    frameCaptured = outputCaptured = true;
                                     ALOGI("JPEG captured: encode=%dx%d blob=%dx%d -> %zu bytes (with EXIF)",
                                           encodeW, encodeH, blobW, blobH, jpegSize);
                                     {
@@ -1636,7 +1642,7 @@ static int camera_device_process_capture_request(const camera3_device_t *device,
                                 }
                                 grallocModule->unlock(grallocModule, handle);
                             });
-                            if (upscaled) free(upscaled);
+
                         } else if (captureRet == -EAGAIN) {
                             if (dev->inflight_tracker) dev->inflight_tracker->remove(frameNum);
                             return -EAGAIN;
@@ -1645,19 +1651,46 @@ static int camera_device_process_capture_request(const camera3_device_t *device,
                         }
                     }
                 } else if (outBuf.stream->format == HAL_PIXEL_FORMAT_YCBCR_420_888) {
-                    struct android_ycbcr ycbcr;
-                    memset(&ycbcr, 0, sizeof(ycbcr));
-                    int captureRet = 0;
+                    struct android_ycbcr ycbcr = {};
+                    int captureRet = -EINVAL;
                     run_guarded([&]() {
+                        if (!grallocModule->lock_ycbcr) return;
                         int ret = grallocModule->lock_ycbcr(grallocModule, handle,
                                                             GRALLOC_USAGE_SW_WRITE_OFTEN,
                                                             0, 0, outBuf.stream->width, outBuf.stream->height, &ycbcr);
                         if (ret != 0 || !ycbcr.y) {
+                            ALOGE("YUV lock failed: %d", ret);
                             return;
                         }
-                        captureRet = pipeline->captureFrame(static_cast<uint8_t*>(ycbcr.y), outBuf.stream->format);
+                        const size_t w = outBuf.stream->width;
+                        const size_t h = outBuf.stream->height;
+                        if (!ycbcr.cb || !ycbcr.cr || ycbcr.ystride < w ||
+                            ycbcr.cstride < (w / 2 - 1) * ycbcr.chroma_step + 1 ||
+                            (ycbcr.chroma_step != 1 && ycbcr.chroma_step != 2)) {
+                            ALOGE("Invalid YUV plane layout");
+                            grallocModule->unlock(grallocModule, handle);
+                            return;
+                        }
+                        // The ISP emits tight NV12; gralloc may expose YV12,
+                        // NV21, or padded planes. Respect the returned layout.
+                        std::vector<uint8_t> nv12(w * h * 3 / 2);
+                        captureRet = streamFrameCaptured
+                                ? pipeline->copyCurrentFrame(nv12.data(), outBuf.stream->format)
+                                : pipeline->captureFrame(nv12.data(), outBuf.stream->format);
                         if (captureRet == 0) {
-                            frameCaptured = true;
+                            auto* y = static_cast<uint8_t*>(ycbcr.y);
+                            auto* cb = static_cast<uint8_t*>(ycbcr.cb);
+                            auto* cr = static_cast<uint8_t*>(ycbcr.cr);
+                            for (size_t row = 0; row < h; ++row)
+                                memcpy(y + row * ycbcr.ystride, nv12.data() + row * w, w);
+                            for (size_t row = 0; row < h / 2; ++row) {
+                                const uint8_t* uv = nv12.data() + w * h + row * w;
+                                for (size_t col = 0; col < w / 2; ++col) {
+                                    cb[row * ycbcr.cstride + col * ycbcr.chroma_step] = uv[2 * col];
+                                    cr[row * ycbcr.cstride + col * ycbcr.chroma_step] = uv[2 * col + 1];
+                                }
+                            }
+                            frameCaptured = outputCaptured = true;
                         }
                         grallocModule->unlock(grallocModule, handle);
                     });
@@ -1674,9 +1707,11 @@ static int camera_device_process_capture_request(const camera3_device_t *device,
                         if (ret != 0 || !vaddr) {
                             return;
                         }
-                        captureRet = pipeline->captureFrame(static_cast<uint8_t*>(vaddr), outBuf.stream->format);
+                        captureRet = streamFrameCaptured
+                                ? pipeline->copyCurrentFrame(static_cast<uint8_t*>(vaddr), outBuf.stream->format)
+                                : pipeline->captureFrame(static_cast<uint8_t*>(vaddr), outBuf.stream->format);
                         if (captureRet == 0) {
-                            frameCaptured = true;
+                            frameCaptured = outputCaptured = true;
                         }
                         grallocModule->unlock(grallocModule, handle);
                     });
@@ -1685,64 +1720,9 @@ static int camera_device_process_capture_request(const camera3_device_t *device,
                         return -EAGAIN;
                     }
                 }
-            }
-        }
-    }
-
-    // STILL_CAPTURE workaround: framework doesn't include BLOB stream in request
-    if (!hasBlobOutput && dev->blob_stream && request->settings && dev->pipeline) {
-        camera_metadata_entry_t entry;
-        if (find_camera_metadata_entry(const_cast<camera_metadata_t*>(request->settings),
-                                       ANDROID_CONTROL_CAPTURE_INTENT, &entry) == 0 && entry.count > 0) {
-            if (entry.data.u8[0] == ANDROID_CONTROL_CAPTURE_INTENT_STILL_CAPTURE) {
-                ALOGI("STILL_CAPTURE detected without BLOB output - proactive JPEG encode");
-                mocha::CameraPipeline* p = static_cast<mocha::CameraPipeline*>(dev->pipeline);
-                uint32_t rgbaSize = dev->pipeline_width * dev->pipeline_height * 4;
-                if (!dev->temp_rgba || dev->temp_rgba_size < rgbaSize) {
-                    if (dev->temp_rgba) free(dev->temp_rgba);
-                    dev->temp_rgba = (uint8_t*)malloc(rgbaSize);
-                    dev->temp_rgba_size = rgbaSize;
-                }
-                if (dev->temp_rgba) {
-                    int capRet = p->captureFrame(dev->temp_rgba, HAL_PIXEL_FORMAT_RGBA_8888);
-                    if (capRet == 0) {
-                        if (!dev->jpeg_encoder) {
-                            dev->jpeg_encoder = new mocha::JpegEncoder();
-                        }
-                        uint32_t blobW = dev->blob_stream->width;
-                        uint32_t blobH = dev->blob_stream->height;
-                        uint32_t blobSize = blobW * blobH * 2;
-                        uint8_t* blobBuf = (uint8_t*)malloc(blobSize);
-                        if (blobBuf) {
-                            size_t jpegSize = 0;
-                            int encRet = dev->jpeg_encoder->encodeRGBA(dev->temp_rgba,
-                                                                        dev->pipeline_width, dev->pipeline_height,
-                                                                        90, blobBuf, blobSize, &jpegSize);
-                            if (encRet == 0 && jpegSize > 0) {
-                                frameCaptured = true;
-                                camera3_jpeg_blob_t blob;
-                                blob.jpeg_blob_id = CAMERA3_JPEG_BLOB_ID;
-                                blob.jpeg_size = jpegSize;
-                                memcpy(blobBuf + jpegSize, &blob, sizeof(blob));
-                                ALOGI("Proactive JPEG: %ux%u -> %zu bytes (BLOB stream %ux%u)",
-                                      dev->pipeline_width, dev->pipeline_height,
-                                      jpegSize, blobW, blobH);
-                                // Write to temp file for verification
-                                FILE* f = fopen("/data/local/tmp/mocha_capture.jpg", "wb");
-                                if (f) {
-                                    fwrite(blobBuf, 1, jpegSize, f);
-                                    fclose(f);
-                                    ALOGI("Wrote JPEG to /data/local/tmp/mocha_capture.jpg");
-                                }
-                            } else {
-                                ALOGE("Proactive JPEG encode failed: %d", encRet);
-                            }
-                            free(blobBuf);
-                        }
-                    } else {
-                        ALOGE("Proactive capture failed: %d", capRet);
-                    }
-                }
+                bufferCaptured[i] = outputCaptured;
+                if (outputCaptured && outBuf.stream->format != HAL_PIXEL_FORMAT_BLOB)
+                    streamFrameCaptured = true;
             }
         }
     }
@@ -1784,7 +1764,7 @@ static int camera_device_process_capture_request(const camera3_device_t *device,
             outputBufs[i] = request->output_buffers[i];
             outputBufs[i].acquire_fence = -1;
             outputBufs[i].release_fence = -1;
-            outputBufs[i].status = (frameCaptured && !frameFlushed) ?
+            outputBufs[i].status = (bufferCaptured[i] && !frameFlushed) ?
                 CAMERA3_BUFFER_STATUS_OK : CAMERA3_BUFFER_STATUS_ERROR;
         }
         numOutputBufs = n;
@@ -1819,7 +1799,7 @@ static int camera_device_process_capture_request(const camera3_device_t *device,
             frameDurNs = p->getFramePeriodNs();
         }
         int64_t timestamp = ((int64_t)ts_end.tv_sec * 1000000000LL) + (ts_end.tv_nsec);
-        resultMetadata = build_result_metadata(frameNum, timestamp, exposureNs, sensitivity, afState, focusPos, frameDurNs, dev->af_mode);
+        resultMetadata = build_result_metadata(frameNum, timestamp, exposureNs, sensitivity, afState, focusPos, frameDurNs, dev->af_mode, dev->camera_id);
     }
 
     camera3_capture_result_t result;
@@ -1913,6 +1893,8 @@ int MochaCameraHAL::openCamera(int cameraId, hw_device_t **device) {
 
     mocha_camera_device_t *dev = (mocha_camera_device_t *)*device;
     dev->camera_id = physId;
+    dev->af_mode = cameraId == 0 ? ANDROID_CONTROL_AF_MODE_CONTINUOUS_PICTURE
+                                : ANDROID_CONTROL_AF_MODE_OFF;
 
     ALOGI("Camera opened successfully: logical=%d phys=%d", cameraId, physId);
     return 0;

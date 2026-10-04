@@ -364,6 +364,13 @@ int CameraPipeline::configure(const PipelineConfig& config) {
           fmt.fmt.pix.bytesperline);
 
 
+    if (fmt.fmt.pix.width != config.width || fmt.fmt.pix.height != config.height ||
+        fmt.fmt.pix.pixelformat != config.pixelFormat ||
+        fmt.fmt.pix.bytesperline < config.width * 2) {
+        ALOGE("Sensor did not accept requested RAW10 mode");
+        return -EINVAL;
+    }
+
     struct v4l2_requestbuffers req;
     memset(&req, 0, sizeof(req));
     req.count = 4;
@@ -381,7 +388,7 @@ int CameraPipeline::configure(const PipelineConfig& config) {
     }
     ALOGI("VIDIOC_REQBUFS: got %d buffers", req.count);
 
-    mBufferCount = req.count;
+    mBufferCount = req.count < 4 ? req.count : 4;
 
     uint32_t bufSize = fmt.fmt.pix.sizeimage;
     for (int i = 0; i < mBufferCount; i++) {
@@ -418,6 +425,7 @@ int CameraPipeline::configure(const PipelineConfig& config) {
         DemosaicParams demosaicParams;
         demosaicParams.width = config.width;
         demosaicParams.height = config.height;
+        demosaicParams.rawStride = fmt.fmt.pix.bytesperline;
         demosaicParams.bayerPattern = config.bayerPattern;
         demosaicParams.offset_x = config.offset_x;
         demosaicParams.offset_y = config.offset_y;
@@ -536,10 +544,65 @@ int CameraPipeline::stopStreaming() {
         }
     }
     mBufferCount = 0;
+    struct v4l2_requestbuffers req = {};
+    req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    req.memory = V4L2_MEMORY_MMAP;
+    ioctl(mFd, VIDIOC_REQBUFS, &req);
 
     mStreaming = false;
     mState = PIPELINE_OPENED;
     return 0;
+}
+
+/* A still must come from the requested sensor mode, never an enlarged
+ * preview. Called under the HAL pipeline lock; restore preview on all exits. */
+int CameraPipeline::captureStill(uint8_t* rgba, uint32_t width, uint32_t height) {
+    if (width == mConfig.width && height == mConfig.height)
+        return captureFrame(rgba, HAL_PIXEL_FORMAT_RGBA_8888);
+    if (mCameraId != 0 || !((width == 3264 && height == 2448) ||
+                          (width == 1920 && height == 1080))) return -EINVAL;
+
+    const PipelineConfig preview = mConfig;
+    const int exposure = mCurrentExposure, gain = mCurrentGain;
+    const int focus = mFocusPosition;
+    float wb[4];
+    memcpy(wb, mAwbGains, sizeof(wb));
+    PipelineConfig still = preview;
+    still.width = width; still.height = height;
+    still.enableAE = false; still.enableAWB = false;
+    memcpy(still.wbGain, wb, sizeof(wb));
+    stopStreaming();
+    int ret = configure(still);
+    if (!ret) ret = startStreaming();
+    if (!ret) {
+        setExposure(exposure); setGain(gain);
+        if (focus >= 0) setFocus(focus);
+        // Discard frames queued before exposure/focus updates reach the sensor.
+        for (int i = 0; i < 3 && !ret; ++i)
+            ret = captureFrame(rgba, HAL_PIXEL_FORMAT_RGBA_8888);
+        if (!ret) ret = captureFrame(rgba, HAL_PIXEL_FORMAT_RGBA_8888);
+    }
+    stopStreaming();
+    // configure() may have allocated buffers even if STREAMON failed.
+    if (mBufferCount) {
+        for (int i = 0; i < mBufferCount; ++i) {
+            if (mBuffers[i].allocated) munmap(mBuffers[i].start, mBuffers[i].length);
+            mBuffers[i].start = nullptr; mBuffers[i].allocated = false;
+        }
+        mBufferCount = 0;
+        struct v4l2_requestbuffers req = {};
+        req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE; req.memory = V4L2_MEMORY_MMAP;
+        ioctl(mFd, VIDIOC_REQBUFS, &req);
+    }
+    int restore = configure(preview);
+    if (!restore) restore = startStreaming();
+    if (!restore) {
+        setExposure(exposure); setGain(gain);
+        if (focus >= 0) setFocus(focus);
+        memcpy(mAwbGains, wb, sizeof(wb)); mHasAwbInit = true;
+    }
+    ALOGI("Native still %ux%u: capture=%d preview restore=%d", width, height, ret, restore);
+    return ret ? ret : restore;
 }
 
 void CameraPipeline::doAutoExposure(const uint8_t* rgbBuffer) {
@@ -853,7 +916,7 @@ int CameraPipeline::captureFrame(uint8_t* outputBuffer, uint32_t outputFormat) {
               frameBuffer[24], frameBuffer[25], frameBuffer[26], frameBuffer[27],
               frameBuffer[28], frameBuffer[29], frameBuffer[30], frameBuffer[31]);
         /* Log 4x4 grid of 10-bit values (v & 0xFF) to see spatial pattern */
-        int w = 1280;
+        int w = mConfig.width;
         uint16_t g[4][4];
         for (int r = 0; r < 4; r++)
             for (int c = 0; c < 4; c++)
@@ -863,7 +926,7 @@ int CameraPipeline::captureFrame(uint8_t* outputBuffer, uint32_t outputFormat) {
         ALOGI("  grid r2: %d %d %d %d", g[2][0]&0xFF, g[2][1]&0xFF, g[2][2]&0xFF, g[2][3]&0xFF);
         ALOGI("  grid r3: %d %d %d %d", g[3][0]&0xFF, g[3][1]&0xFF, g[3][2]&0xFF, g[3][3]&0xFF);
         /* Middle of image */
-        int midY = 360, midX = 640;
+        int midY = mConfig.height / 2, midX = mConfig.width / 2;
         uint16_t mg[4][4];
         for (int r = 0; r < 4; r++)
             for (int c = 0; c < 4; c++)
@@ -926,6 +989,11 @@ int CameraPipeline::processBayerToYuv(const uint8_t* bayerData, uint8_t* output,
     applyWbAndCcm(mRgbBuffer, total, rG, gG, bG);
     applyGamma(mRgbBuffer, mConfig.width, mConfig.height, mConfig.gamma);
 
+    return copyCurrentFrame(output, outputFormat);
+}
+
+int CameraPipeline::copyCurrentFrame(uint8_t* output, uint32_t outputFormat) {
+    if (!output || !mRgbBuffer || !mColorConv) return -EINVAL;
     if (outputFormat == HAL_PIXEL_FORMAT_YCBCR_420_888) {
         uint8_t* yPlane = output;
         uint8_t* uvPlane = output + mConfig.width * mConfig.height;
@@ -1125,6 +1193,11 @@ int CameraPipeline::captureForAf() {
 }
 
 void CameraPipeline::startAfScan() {
+    // OV5693 front camera has no VCM / focus control on this board.
+    if (mCameraId != 0) {
+        mAfState = 0;
+        return;
+    }
     if (mState != PIPELINE_STREAMING) {
         ALOGW("AF: cannot scan, not streaming");
         mAfState = 0;

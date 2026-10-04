@@ -14,6 +14,7 @@ namespace mocha {
 struct DemosaicParams {
     uint16_t width;
     uint16_t height;
+    uint32_t rawStride;     // V4L2 bytesperline, including row padding
     uint8_t  bayerPattern;  // 0=RGGB, 1=GRBG, 2=GBRG, 3=BGGR
     uint8_t  offset_x;      // X offset for pattern alignment
     uint8_t  offset_y;      // Y offset for pattern alignment

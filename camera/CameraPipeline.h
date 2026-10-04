@@ -58,6 +58,9 @@ public:
     int stopStreaming();
 
     int captureFrame(uint8_t* outputBuffer, uint32_t outputFormat);
+    // Convert the frame just captured while the caller holds pipelineLock.
+    int copyCurrentFrame(uint8_t* outputBuffer, uint32_t outputFormat);
+    int captureStill(uint8_t* rgba, uint32_t width, uint32_t height);
 
     PipelineState getState() const { return mState; }
 
