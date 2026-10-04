@@ -125,8 +125,11 @@ PRODUCT_PACKAGES += \
     setup_fs
 
 # FM
-#PRODUCT_PACKAGES += \
-#    android.hardware.broadcastradio@1.0-impl
+PRODUCT_PACKAGES += \
+    FMRadio \
+    libfmjni \
+    libfmradio.v4l2-fm \
+    brcm-uim-sysfs
 
 # Graphics
 PRODUCT_AAPT_CONFIG += xlarge large

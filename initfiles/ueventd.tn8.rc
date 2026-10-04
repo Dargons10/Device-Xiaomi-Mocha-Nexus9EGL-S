@@ -49,7 +49,7 @@
 /dev/nvhost-prof-gpu   0666   root   root
 /dev/tlk_device 0660    system  drmrpc
 # for FM V4L2 Radio
-/dev/radio      0666    system  radio
+/dev/radio*     0666    system  radio
 /dev/mpu        0640    system  system
 /dev/mpuirq     0640    system  system
 /dev/accelirq   0640    system  system
