@@ -17,10 +17,10 @@
 #ifndef _BDROID_BUILDCFG_H
 #define _BDROID_BUILDCFG_H
 
-// SERVICE_CLASS:0x5A (Bit17 -Networking,Bit19 - Capturing,Bit20 -Object Transfer,Bit22 -Telephony)
+// Networking, capturing and object transfer. This tablet has no telephony.
 // MAJOR CLASS: COMPUTER
 // MINOR CLASS: TABLET
-#define BTA_DM_COD {0x5A, 0x01, 0x10}
+#define BTA_DM_COD {0x1A, 0x01, 0x10}
 
 #endif
 

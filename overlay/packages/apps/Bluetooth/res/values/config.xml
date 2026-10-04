@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Wi-Fi tablet: no supported SCO call route. Keep A2DP/AVRCP. -->
+    <bool name="profile_supported_hs_hfp">false</bool>
+    <bool name="profile_supported_hfpclient">false</bool>
+    <bool name="profile_supported_sap">false</bool>
+</resources>

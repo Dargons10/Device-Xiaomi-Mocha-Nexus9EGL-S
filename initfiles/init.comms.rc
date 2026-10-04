@@ -45,3 +45,9 @@ service dns_masq /system/bin/dnsmasq --no-daemon --no-resolv --no-poll --dhcp-op
     group dhcp wifi system
     disabled
     oneshot
+
+# Owns ttyTHS2 for the Broadcom Bluetooth/FM shared transport.
+service uim /vendor/bin/brcm-uim-sysfs
+    class late_start
+    user root
+    group bluetooth net_bt
