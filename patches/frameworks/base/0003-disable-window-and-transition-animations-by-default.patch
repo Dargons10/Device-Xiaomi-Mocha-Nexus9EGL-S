@@ -1,0 +1,30 @@
+From fb0cec9f6b2b0b66de272eaab237ec09b971b75d Mon Sep 17 00:00:00 2001
+From: "Qwen3.8-27B-local" <qwen@local>
+Date: Mon, 5 Oct 2026 21:12:51 +0200
+Subject: [PATCH] fix: disable window/transition animations by default (scale
+ 0.0)
+
+---
+ .../java/com/android/server/wm/WindowManagerService.java    | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/services/core/java/com/android/server/wm/WindowManagerService.java b/services/core/java/com/android/server/wm/WindowManagerService.java
+index d25b4d122ba9..ef00ed720dfa 100644
+--- a/services/core/java/com/android/server/wm/WindowManagerService.java
++++ b/services/core/java/com/android/server/wm/WindowManagerService.java
+@@ -1012,9 +1012,9 @@ public class WindowManagerService extends IWindowManager.Stub
+     PowerManager mPowerManager;
+     PowerManagerInternal mPowerManagerInternal;
+ 
+-    private float mWindowAnimationScaleSetting = 1.0f;
+-    private float mTransitionAnimationScaleSetting = 1.0f;
+-    private float mAnimatorDurationScaleSetting = 1.0f;
++    private float mWindowAnimationScaleSetting = 0.0f;
++    private float mTransitionAnimationScaleSetting = 0.0f;
++    private float mAnimatorDurationScaleSetting = 0.0f;
+     private boolean mAnimationsDisabled = false;
+     boolean mPointerLocationEnabled = false;
+ 
+-- 
+2.47.3
+
