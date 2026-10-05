@@ -165,6 +165,10 @@ RED_LED_PATH := /sys/class/leds/red/brightness
 GREEN_LED_PATH := /sys/class/leds/green/brightness
 BLUE_LED_PATH := /sys/class/leds/blue/brightness
 
+
+# OTA mocha
+TARGET_RELEASETOOLS_EXTENSIONS := device/xiaomi/mocha/releasetools
+
 # Per-application sizes for shader cache
 MAX_EGL_CACHE_SIZE := 4194304
 MAX_EGL_CACHE_ENTRY_SIZE := 262144

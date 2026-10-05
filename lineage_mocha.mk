@@ -15,4 +15,5 @@ PRODUCT_BUILD_PROP_OVERRIDES += BUILD_FINGERPRINT=Xiaomi/carbon_mocha/mocha:5.1.
 PRODUCT_GMS_CLIENTID_BASE := android-xiaomi
 
 
-  
+# Include firmware
+$(call inherit-product, vendor/xiaomi-firmware/mocha/firmware.mk)
