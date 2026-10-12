@@ -121,6 +121,10 @@ CameraPipeline::CameraPipeline()
     mDeltaCount(0),
     mTimingFrozen(false),
     mAeHoldFrames(0),
+      mExposureFailCount(0),
+      mExposureBackoffFrames(0),
+      mGainFailCount(0),
+      mGainBackoffFrames(0),
       mHasAwbInit(false),
       mLastGamma(0.0f),
       mFocusPosition(0),
@@ -364,11 +368,15 @@ int CameraPipeline::configure(const PipelineConfig& config) {
           fmt.fmt.pix.bytesperline);
 
 
-    if (fmt.fmt.pix.width != config.width || fmt.fmt.pix.height != config.height ||
-        fmt.fmt.pix.pixelformat != config.pixelFormat ||
-        fmt.fmt.pix.bytesperline < config.width * 2) {
-        ALOGE("Sensor did not accept requested RAW10 mode");
+    if (fmt.fmt.pix.width == 0 || fmt.fmt.pix.height == 0) {
+        ALOGE("VIDIOC_S_FMT: driver rejected format (0x0)");
         return -EINVAL;
+    }
+    if (fmt.fmt.pix.width != config.width || fmt.fmt.pix.height != config.height ||
+        fmt.fmt.pix.pixelformat != config.pixelFormat) {
+        ALOGW("VIDIOC_S_FMT: driver returned %dx%d fmt=0x%x bpl=%d (requested %dx%d fmt=0x%x) - continuing",
+              fmt.fmt.pix.width, fmt.fmt.pix.height, fmt.fmt.pix.pixelformat,
+              fmt.fmt.pix.bytesperline, config.width, config.height, config.pixelFormat);
     }
 
     struct v4l2_requestbuffers req;
@@ -569,18 +577,43 @@ int CameraPipeline::captureStill(uint8_t* rgba, uint32_t width, uint32_t height)
     memcpy(wb, mAwbGains, sizeof(wb));
     PipelineConfig still = preview;
     still.width = width; still.height = height;
-    still.enableAE = false; still.enableAWB = false;
+    /* Native readout (no binning) is several stops darker than the binned
+     * preview at the same settings, so preview exposure/gain must NOT be
+     * frozen here: run the AE closed loop at native resolution exactly
+     * like the preview does, and cap the remaining deficit with a
+     * linear-domain digital gain if the sensor is already maxed out. */
+    still.enableAE = true; still.enableAWB = false;
+    still.digitalGain = 1.0f;
     memcpy(still.wbGain, wb, sizeof(wb));
     stopStreaming();
     int ret = configure(still);
     if (!ret) ret = startStreaming();
     if (!ret) {
         setExposure(exposure); setGain(gain);
+        mAeHoldFrames = 0;
         if (focus >= 0) setFocus(focus);
-        // Discard frames queued before exposure/focus updates reach the sensor.
-        for (int i = 0; i < 3 && !ret; ++i)
+        const float target = preview.targetLuma;
+        float luma = 0.0f;
+        /* 3 iterations: AE converges (or saturates) within 2 frames in
+         * practice; a 5th frame never added light in testing. */
+        for (int iters = 0; iters < 3 && !ret; ++iters) {
             ret = captureFrame(rgba, HAL_PIXEL_FORMAT_RGBA_8888);
-        if (!ret) ret = captureFrame(rgba, HAL_PIXEL_FORMAT_RGBA_8888);
+            luma = mLastAvgLuma;
+            ALOGI("captureStill: AE iter %d luma=%.4f (target %.2f) exp=%d gain=%d",
+                  iters, luma, target, mCurrentExposure, mCurrentGain);
+            if (!ret && luma > target * 0.8f) break;
+        }
+        /* Still short (max exposure/gain reached, or I2C EIO backoff):
+         * make up the rest digitally in the LINEAR domain so gamma keeps
+         * the shadows instead of a black frame. The kernel clamps the
+         * V4L2 gain control at 240, so no analog headroom is left here. */
+        if (!ret && luma > 0.00003f && luma < target * 0.8f) {
+            float need = target / luma;
+            if (need > 8.0f) need = 8.0f;
+            mConfig.digitalGain = need;
+            ALOGI("captureStill: luma=%.4f -> digital x%.2f", luma, need);
+            ret = captureFrame(rgba, HAL_PIXEL_FORMAT_RGBA_8888);
+        }
     }
     stopStreaming();
     // configure() may have allocated buffers even if STREAMON failed.
@@ -623,6 +656,7 @@ void CameraPipeline::doAutoExposure(const uint8_t* rgbBuffer) {
     }
     if (count == 0) return;
     float avgLuma = (float)sum / count / 255.0f;
+    mLastAvgLuma = avgLuma;
     float target = mConfig.targetLuma;
 
     /* Deadband: do nothing within +/-15% of target. Without this the AE
@@ -693,8 +727,22 @@ void CameraPipeline::doAutoExposure(const uint8_t* rgbBuffer) {
     }
 
     if (newExp != mCurrentExposure || newGain != mCurrentGain) {
-        if (newGain != mCurrentGain) setGain(newGain);
-        if (newExp != mCurrentExposure) setExposure(newExp);
+        if (newGain != mCurrentGain && mGainBackoffFrames <= 0) {
+            if (setGain(newGain) == 0) {
+                mGainFailCount = 0;
+            } else {
+                if (++mGainFailCount >= 3) mGainBackoffFrames = 30;
+            }
+        }
+        if (newExp != mCurrentExposure && mExposureBackoffFrames <= 0) {
+            if (setExposure(newExp) == 0) {
+                mExposureFailCount = 0;
+            } else {
+                if (++mExposureFailCount >= 3) mExposureBackoffFrames = 30;
+            }
+        }
+        if (mExposureBackoffFrames > 0) mExposureBackoffFrames--;
+        if (mGainBackoffFrames > 0) mGainBackoffFrames--;
         mAeHoldFrames = 6;
         ALOGI("AE: luma=%.2f target=%.2f exp=%d(%d) gain=%d(%d) hold",
               avgLuma, target, newExp, mCurrentExposure, newGain, mCurrentGain);

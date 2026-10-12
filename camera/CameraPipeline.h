@@ -134,14 +134,22 @@ private:
     int mDeltaCount;
     bool mTimingFrozen;
     int mAeHoldFrames;         // AE hold countdown (anti-flicker)
+    int mExposureFailCount;
+    int mExposureBackoffFrames;
+    int mGainFailCount;
+    int mGainBackoffFrames;
     float mAwbGains[4];
     bool mHasAwbInit;
+    float mLastAvgLuma;        // last luma (0..1) fed to the AE loop
     uint8_t mGammaLut[256];
     float mLastGamma;
 
     int mFocusPosition;
     int mAfState;
     int64_t mAfLastScanNs;
+
+public:
+    float lastAvgLuma() const { return mLastAvgLuma; }
 };
 
 } // namespace mocha

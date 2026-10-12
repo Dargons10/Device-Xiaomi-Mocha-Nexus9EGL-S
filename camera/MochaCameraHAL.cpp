@@ -1515,9 +1515,16 @@ static int camera_device_process_capture_request(const camera3_device_t *device,
                     if (s && s->format == HAL_PIXEL_FORMAT_BLOB) wantsBlob = true;
                 }
                 if (wantsBlob && p->afAgeMs() > 3000) {
-                    ALOGI("AF: shutter with stale lock (%lld ms) - rescanning before capture",
-                          (long long)p->afAgeMs());
-                    p->startAfScan();
+                    if (p->lastAvgLuma() < 0.05f) {
+                        /* Contrast AF is "inconclusive (flat contrast)" in dark
+                         * scenes and just burns ~1.2 s per capture; skip it. */
+                        ALOGI("AF: scene too dark (luma=%.3f), skipping rescan",
+                              p->lastAvgLuma());
+                    } else {
+                        ALOGI("AF: shutter with stale lock (%lld ms) - rescanning before capture",
+                              (long long)p->afAgeMs());
+                        p->startAfScan();
+                    }
                 }
             }
         }
@@ -1537,6 +1544,11 @@ static int camera_device_process_capture_request(const camera3_device_t *device,
         mocha::CameraPipeline* pipeline = static_cast<mocha::CameraPipeline*>(dev->pipeline);
 
         if (pipeline->getState() == mocha::PIPELINE_OPENED) {
+            if (dev->closing) {
+                ALOGI("process_capture_request: closing in progress, skipping restart");
+                if (dev->inflight_tracker) dev->inflight_tracker->remove(frameNum);
+                return -ENOSYS;
+            }
             ALOGI("process_capture_request: pipeline in OPENED state, re-starting streaming");
             int restartRet = pipeline->startStreaming();
             if (restartRet != 0) {
