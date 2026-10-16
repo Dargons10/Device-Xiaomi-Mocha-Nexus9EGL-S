@@ -1,0 +1,17 @@
+diff --git a/libprocessgroup/processgroup.cpp b/libprocessgroup/processgroup.cpp
+index 2ce3fa0c7..5f4cc2eae 100644
+--- a/libprocessgroup/processgroup.cpp
++++ b/libprocessgroup/processgroup.cpp
+@@ -477,8 +477,10 @@ int createProcessGroup(uid_t uid, int initialPid, bool memControl) {
+         }
+     }
+ 
+-    CgroupGetControllerPath(CGROUPV2_CONTROLLER_NAME, &cgroup);
+-    return createProcessGroupInternal(uid, initialPid, cgroup);
++    if (CgroupGetControllerPath(CGROUPV2_CONTROLLER_NAME, &cgroup)) {
++        return createProcessGroupInternal(uid, initialPid, cgroup);
++    }
++    return 0;
+ }
+ 
+ static bool SetProcessGroupValue(int tid, const std::string& attr_name, int64_t value) {
