@@ -13,6 +13,13 @@ import /vendor/etc/init/hw/init.cal.rc
 import /vendor/etc/init/hw/init.tn8.usb.rc
 
 on post-fs-data
+    # Fix memcg cgroup.procs permissions so system_server (uid 1000) can write
+    chown system system /dev/memcg/cgroup.procs
+    chmod 0666 /dev/memcg/cgroup.procs
+    chown system system /dev/memcg/apps/cgroup.procs
+    chmod 0666 /dev/memcg/apps/cgroup.procs
+    chown system system /dev/memcg/system/cgroup.procs
+    chmod 0666 /dev/memcg/system/cgroup.procs
     chmod 0644 /sys/kernel/cluster/active
     write /sys/class/gpio/export 61
     write /sys/class/gpio/gpio61/direction out
