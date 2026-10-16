@@ -1,0 +1,33 @@
+diff --git a/libprocessgroup/profiles/cgroups.json b/libprocessgroup/profiles/cgroups.json
+index 063422091..ded118eb3 100644
+--- a/libprocessgroup/profiles/cgroups.json
++++ b/libprocessgroup/profiles/cgroups.json
+@@ -24,25 +24,10 @@
+     {
+       "Controller": "memory",
+       "Path": "/dev/memcg",
+-      "Mode": "0700",
+-      "UID": "root",
++      "Mode": "0755",
++      "UID": "system",
+       "GID": "system",
+       "Optional": true
+     }
+-  ],
+-  "Cgroups2": {
+-    "Path": "/sys/fs/cgroup",
+-    "Mode": "0755",
+-    "UID": "system",
+-    "GID": "system",
+-    "Controllers": [
+-      {
+-        "Controller": "freezer",
+-        "Path": ".",
+-        "Mode": "0755",
+-        "UID": "system",
+-        "GID": "system"
+-      }
+-    ]
+-  }
++  ]
+ }
