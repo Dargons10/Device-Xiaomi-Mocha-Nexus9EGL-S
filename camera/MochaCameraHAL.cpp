@@ -581,8 +581,9 @@ static camera_metadata_t* init_static_characteristics(int cameraId) {
     add_camera_metadata_entry(metadata, ANDROID_CONTROL_AE_COMPENSATION_STEP, &ae_comp_step, 1);
 
     // Sensor exposure time range (required)
-    /* IMX179 V4L2 exposure control = 10..2500 lines, line ~15.8us */
-    int64_t exposure_time_range[] = { 160000LL, 40000000LL };  // 160us to 40ms
+    /* IMX179 V4L2 exposure control = 10..2500 lines, line ~15.8us;
+     * long exposure extends frame length up to 10000 lines (~158ms) */
+    int64_t exposure_time_range[] = { 160000LL, 158000000LL };  // 160us to 158ms
     add_camera_metadata_entry(metadata, ANDROID_SENSOR_INFO_EXPOSURE_TIME_RANGE, exposure_time_range, 2);
 
     // Sensor sensitivity range (required)

@@ -1,4 +1,5 @@
 #include "CameraPipeline.h"
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -113,7 +114,7 @@ CameraPipeline::CameraPipeline()
     mMainHalfNs(10000000),
     mVtsLines(2510),
     mExpMin(10),
-    mExpMax(2500),
+    mExpMax(10000),
     mExpUnitsPerLine(1),
     mLinePeriodNs(0),
     mFramePeriodNs(0),
@@ -145,6 +146,9 @@ CameraPipeline::CameraPipeline()
 CameraPipeline::~CameraPipeline() {
     close();
 }
+
+/* Direct IMX179 register write via /dev/i2c-2 (mSensorFd bound to 0x10). */
+static int i2cWriteReg(int fd, uint16_t reg, uint8_t val);
 
 int CameraPipeline::open(int cameraId) {
     ALOGI("CameraPipeline::open cameraId=%d", cameraId);
@@ -182,6 +186,24 @@ int CameraPipeline::open(int cameraId) {
 
     if (cameraId == 0) {
         initFocuser();
+        /* Direct I2C access to IMX179 (addr 0x10 on /dev/i2c-2), same trick
+         * as the front camera. VIDIOC_S_CTRL on the Tegra camera device goes
+         * through the AVP frame-sync RPC path (~1s per register write);
+         * writing the sensor registers directly takes ~1ms. I2C transfers
+         * are serialized by the adapter lock, so this is safe alongside the
+         * kernel driver. */
+        mSensorFd = ::open("/dev/i2c-2", O_RDWR);
+        if (mSensorFd < 0) {
+            ALOGE("Failed to open /dev/i2c-2 for IMX179: %s", strerror(errno));
+        } else {
+            if (ioctl(mSensorFd, I2C_SLAVE_FORCE, 0x10) < 0) {
+                ALOGE("I2C_SLAVE_FORCE 0x10 failed: %s", strerror(errno));
+                ::close(mSensorFd);
+                mSensorFd = -1;
+            } else {
+                ALOGI("I2C bus opened for IMX179 (addr 0x10, FORCE)");
+            }
+        }
     } else {
         /* Open I2C bus for OV5693 register access (front camera).
            Use I2C_SLAVE_FORCE since kernel driver already has 0x36 bound. */
@@ -237,7 +259,68 @@ int CameraPipeline::close() {
     return 0;
 }
 
+/* Direct IMX179 register write via /dev/i2c-2 (mSensorFd bound to 0x10). */
+static int i2cWriteReg(int fd, uint16_t reg, uint8_t val) {
+    uint8_t buf[3] = { (uint8_t)(reg >> 8), (uint8_t)(reg & 0xff), val };
+    ssize_t n = write(fd, buf, sizeof(buf));
+    return (n == (ssize_t)sizeof(buf)) ? 0 : -errno;
+}
+
+/* Batched direct register writes: pack every register of one AE update into
+ * a single I2C_RDWR ioctl (one adapter lock, one master transfer sequence).
+ * The Tegra I2C module loses the completion IRQ on the first transfer after
+ * its clock is re-enabled, so each transfer after an idle gap pays the 1 s
+ * TEGRA_I2C_TIMEOUT and only succeeds on the driver's internal retry. The
+ * kernel's own bursts are fast because they pack ~90 registers into ONE
+ * transfer; doing the same here keeps a full exposure+gain update to a
+ * single cold penalty. */
+struct I2cRegOp { uint16_t reg; uint8_t val; };
+static int i2cWriteRegs(int fd, const I2cRegOp *ops, int n) {
+    struct i2c_msg msgs[16];
+    struct i2c_rdwr_ioctl_data xfer;
+    uint8_t bufs[16][3];
+    if (n > 16) n = 16;
+    for (int i = 0; i < n; i++) {
+        bufs[i][0] = (uint8_t)(ops[i].reg >> 8);
+        bufs[i][1] = (uint8_t)(ops[i].reg & 0xff);
+        bufs[i][2] = ops[i].val;
+        msgs[i].addr = 0x10;
+        msgs[i].flags = 0; /* write, repeated-start between messages */
+        msgs[i].len = 3;
+        msgs[i].buf = bufs[i];
+    }
+    xfer.msgs = msgs;
+    xfer.nummsgs = n;
+    if (ioctl(fd, I2C_RDWR, &xfer) < 0)
+        return -errno;
+    return 0;
+}
+
 int CameraPipeline::setExposure(int exposure) {
+    if (mCameraId == 0 && mSensorFd >= 0) {
+        auto t0 = std::chrono::steady_clock::now();
+        /* Group-hold (reg 0x0104, from stock imx179.c): exposure, gain and
+         * frame length take effect atomically at the next frame boundary,
+         * avoiding half-applied frames / flicker. All writes in one batch. */
+        int frameLen = (exposure > 2490) ? (exposure + 16) : 2510;
+        I2cRegOp ops[6] = {
+            { 0x0104, 0x01 },
+            { 0x0202, (uint8_t)((exposure >> 8) & 0xff) },
+            { 0x0203, (uint8_t)(exposure & 0xff) },
+            { 0x0340, (uint8_t)((frameLen >> 8) & 0xff) },
+            { 0x0341, (uint8_t)(frameLen & 0xff) },
+            { 0x0104, 0x00 },
+        };
+        int ret = i2cWriteRegs(mSensorFd, ops, 6);
+        auto t2 = std::chrono::steady_clock::now();
+        ALOGI("setExposure(%d) batch ms=%lld ret=%d", exposure,
+              (long long)std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t0).count(),
+              ret);
+        if (ret == 0)
+            mCurrentExposure = exposure;
+        return ret;
+    }
+
     struct v4l2_control ctrl;
     memset(&ctrl, 0, sizeof(ctrl));
     ctrl.id = V4L2_CID_EXPOSURE;
@@ -253,6 +336,23 @@ int CameraPipeline::setExposure(int exposure) {
 }
 
 int CameraPipeline::setGain(int gain) {
+    if (mCameraId == 0 && mSensorFd >= 0) {
+        auto t0 = std::chrono::steady_clock::now();
+        I2cRegOp ops[3] = {
+            { 0x0104, 0x01 },
+            { 0x0205, (uint8_t)(gain & 0xff) },
+            { 0x0104, 0x00 },
+        };
+        int ret = i2cWriteRegs(mSensorFd, ops, 3);
+        auto t2 = std::chrono::steady_clock::now();
+        ALOGI("setGain(%d) batch ms=%lld ret=%d", gain,
+              (long long)std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t0).count(),
+              ret);
+        if (ret == 0)
+            mCurrentGain = gain;
+        return ret;
+    }
+
     struct v4l2_control ctrl;
     memset(&ctrl, 0, sizeof(ctrl));
     ctrl.id = V4L2_CID_GAIN;
@@ -317,7 +417,10 @@ int CameraPipeline::configure(const PipelineConfig& config) {
         mVtsLines = 2510;
         mExpUnitsPerLine = 1;
         mExpMin = 10;
-        mExpMax = 2500;
+        /* Long exposure: setExposure extends frame length (0x0340/41)
+         * beyond the native 2510-line frame, so the AE loop can request
+         * up to 10000 lines (~160 ms) for dark scenes. */
+        mExpMax = 10000;
     } else {
         mVtsLines = 992;
         mExpUnitsPerLine = 16;
@@ -501,6 +604,7 @@ static void ov5693_init_via_i2c(int i2c_fd) {
 
 int CameraPipeline::startStreaming() {
     if (mState != PIPELINE_OPENED) return -EINVAL;
+    auto tStart = std::chrono::steady_clock::now();
 
     /* Re-request buffers (idempotent: reuses existing if count matches) */
     for (int i = 0; i < mBufferCount; i++) {
@@ -513,16 +617,27 @@ int CameraPipeline::startStreaming() {
         if (ioctl(mFd, VIDIOC_QBUF, &buf) < 0) return -errno;
     }
 
-    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (ioctl(mFd, VIDIOC_STREAMON, &type) < 0) return -errno;
+    auto tQbuf = std::chrono::steady_clock::now();
 
     if (mCameraId == 0) {
+        /* Apply exposure/gain BEFORE STREAMON: the kernel's async s_stream
+         * sequence (chip-ID reads + init-reg burst with NACK retries) holds
+         * the I2C adapter lock for ~2 s, and a write queued behind it blocks
+         * for that whole time. In standby these writes are fast and legal;
+         * s_stream's init table resets exposure, and the AE loop re-applies
+         * it within a few ms once streaming starts. */
         mCurrentExposure = 800;
         mCurrentGain = 60;
         setExposure(mCurrentExposure);
         setGain(mCurrentGain);
         ALOGI("Initial exposure=%d gain=%d", mCurrentExposure, mCurrentGain);
-    } else {
+    }
+
+    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (ioctl(mFd, VIDIOC_STREAMON, &type) < 0) return -errno;
+    auto tStreamon = std::chrono::steady_clock::now();
+
+    if (mCameraId != 0) {
         /* Front camera: write full OV5693 register table via I2C.
            Wait for kernel to power on sensor (s_power in capture thread). */
         usleep(300000); /* 300ms - wait for sensor power-on */
@@ -536,6 +651,12 @@ int CameraPipeline::startStreaming() {
 
     mStreaming = true;
     mState = PIPELINE_STREAMING;
+
+    auto tEnd = std::chrono::steady_clock::now();
+    ALOGI("startStreaming ms: qbuf=%lld streamon=%lld expgain=%lld",
+          (long long)std::chrono::duration_cast<std::chrono::milliseconds>(tQbuf - tStart).count(),
+          (long long)std::chrono::duration_cast<std::chrono::milliseconds>(tStreamon - tQbuf).count(),
+          (long long)std::chrono::duration_cast<std::chrono::milliseconds>(tEnd - tStreamon).count());
     return 0;
 }
 
@@ -586,13 +707,20 @@ int CameraPipeline::captureStill(uint8_t* rgba, uint32_t width, uint32_t height)
     still.enableAE = true; still.enableAWB = false;
     still.digitalGain = 1.0f;
     memcpy(still.wbGain, wb, sizeof(wb));
+    struct timespec ts, te;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    long long tStop, tConf, tStart, tSet, tAe;
     stopStreaming();
+    clock_gettime(CLOCK_MONOTONIC, &te); tStop = (te.tv_sec-ts.tv_sec)*1000 + (te.tv_nsec-ts.tv_nsec)/1000000;
     int ret = configure(still);
+    clock_gettime(CLOCK_MONOTONIC, &te); tConf = (te.tv_sec-ts.tv_sec)*1000 + (te.tv_nsec-ts.tv_nsec)/1000000;
     if (!ret) ret = startStreaming();
+    clock_gettime(CLOCK_MONOTONIC, &te); tStart = (te.tv_sec-ts.tv_sec)*1000 + (te.tv_nsec-ts.tv_nsec)/1000000;
     if (!ret) {
         setExposure(exposure); setGain(gain);
         mAeHoldFrames = 0;
         if (focus >= 0) setFocus(focus);
+        clock_gettime(CLOCK_MONOTONIC, &te); tSet = (te.tv_sec-ts.tv_sec)*1000 + (te.tv_nsec-ts.tv_nsec)/1000000;
         const float target = preview.targetLuma;
         float luma = 0.0f;
         /* 3 iterations: AE converges (or saturates) within 2 frames in
@@ -617,6 +745,7 @@ int CameraPipeline::captureStill(uint8_t* rgba, uint32_t width, uint32_t height)
         }
     }
     stopStreaming();
+    clock_gettime(CLOCK_MONOTONIC, &te); tAe = (te.tv_sec-ts.tv_sec)*1000 + (te.tv_nsec-ts.tv_nsec)/1000000;
     // configure() may have allocated buffers even if STREAMON failed.
     if (mBufferCount) {
         for (int i = 0; i < mBufferCount; ++i) {
@@ -630,12 +759,16 @@ int CameraPipeline::captureStill(uint8_t* rgba, uint32_t width, uint32_t height)
     }
     int restore = configure(preview);
     if (!restore) restore = startStreaming();
+    long long tRestore;
+    clock_gettime(CLOCK_MONOTONIC, &te); tRestore = (te.tv_sec-ts.tv_sec)*1000 + (te.tv_nsec-ts.tv_nsec)/1000000;
     if (!restore) {
         setExposure(exposure); setGain(gain);
         if (focus >= 0) setFocus(focus);
         memcpy(mAwbGains, wb, sizeof(wb)); mHasAwbInit = true;
     }
     ALOGI("Native still %ux%u: capture=%d preview restore=%d", width, height, ret, restore);
+    ALOGI("captureStill timing ms: stop=%lld configure=%lld start=%lld setExpGain=%lld aeLoop=%lld restore=%lld",
+          tStop, tConf - tStop, tStart - tConf, tSet - tStart, tAe - tSet, tRestore - tAe);
     return ret ? ret : restore;
 }
 
@@ -836,6 +969,9 @@ int CameraPipeline::captureFrame(uint8_t* outputBuffer, uint32_t outputFormat) {
         return -EINVAL;
     }
 
+    struct timespec t0, t1, t2;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+
     struct pollfd pfd;
     pfd.fd = mFd;
     pfd.events = POLLIN;
@@ -984,10 +1120,36 @@ int CameraPipeline::captureFrame(uint8_t* outputBuffer, uint32_t outputFormat) {
         ALOGI("  mid r1: %d %d %d %d", mg[1][0]&0xFF, mg[1][1]&0xFF, mg[1][2]&0xFF, mg[1][3]&0xFF);
         ALOGI("  mid r2: %d %d %d %d", mg[2][0]&0xFF, mg[2][1]&0xFF, mg[2][2]&0xFF, mg[2][3]&0xFF);
         ALOGI("  mid r3: %d %d %d %d", mg[3][0]&0xFF, mg[3][1]&0xFF, mg[3][2]&0xFF, mg[3][3]&0xFF);
+        /* Bayer phase debug: mean raw value at the four 2x2 parity positions
+         * over a 128x128 patch at frame center. The G parities are the
+         * brightest, B the darkest; which parity is G identifies the true
+         * phase of the stream (RGGB/GRBG/GBRG/BGGR). */
+        {
+            double par[2][2] = {{0, 0}, {0, 0}};
+            long parN = 0;
+            int sY = midY - 64, sX = midX - 64;
+            for (int r = 0; r < 128; r++)
+                for (int c = 0; c < 128; c++) {
+                    uint16_t v;
+                    memcpy(&v, frameBuffer + ((sY + r) * w + (sX + c)) * 2, 2);
+                    par[r & 1][c & 1] += (v & 0x3FF);
+                    parN++;
+                }
+            ALOGI("  parity ee=%.1f eo=%.1f oe=%.1f oo=%.1f",
+                  par[0][0] / parN, par[0][1] / parN,
+                  par[1][0] / parN, par[1][1] / parN);
+        }
     }
 
     if (mConfig.enableISP && mDemosaic && mColorConv) {
+        clock_gettime(CLOCK_MONOTONIC, &t1);
         ret = processBayerToYuv(frameBuffer, outputBuffer, outputFormat);
+        clock_gettime(CLOCK_MONOTONIC, &t2);
+        long long ispMs = (t2.tv_sec - t1.tv_sec) * 1000 + (t2.tv_nsec - t1.tv_nsec) / 1000000;
+        long long dqMs  = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+        if (ispMs > 200)
+            ALOGI("captureFrame: %ux%u poll+DQBUF=%lldms ISP=%lldms",
+                  mConfig.width, mConfig.height, dqMs, ispMs);
     } else {
         memcpy(outputBuffer, frameBuffer, frameSize);
         ret = 0;
@@ -1001,7 +1163,10 @@ int CameraPipeline::captureFrame(uint8_t* outputBuffer, uint32_t outputFormat) {
 int CameraPipeline::processBayerToYuv(const uint8_t* bayerData, uint8_t* output, uint32_t outputFormat) {
     if (!bayerData || !output || !mDemosaic || !mColorConv) return -EINVAL;
 
+    struct timespec g0, g1, g2, g3, g4, g5, g6;
+    clock_gettime(CLOCK_MONOTONIC, &g0);
     mDemosaic->process(bayerData, mRgbBuffer);
+    clock_gettime(CLOCK_MONOTONIC, &g1);
 
     /* Debug: log RGB stats after demosaic */
     {
