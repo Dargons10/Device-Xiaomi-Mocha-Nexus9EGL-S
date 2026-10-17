@@ -129,7 +129,8 @@ CameraPipeline::CameraPipeline()
       mLastGamma(0.0f),
       mFocusPosition(0),
       mAfState(0),
-      mAfLastScanNs(0) {
+      mAfLastScanNs(0),
+      mAfFrameCk(0) {
     for (int i = 0; i < 4; i++) {
         mBuffers[i].start = nullptr;
         mBuffers[i].length = 0;
@@ -1225,6 +1226,13 @@ int CameraPipeline::captureForAf() {
     uint8_t* frameBuffer = (uint8_t*)mBuffers[buf.index].start;
     int energy = 0;
 
+    /* Cheap checksum over sampled raw bytes: lets the AF sweep detect a
+     * frozen stream (kernel requeuing stale buffer content) instead of
+     * wasting the full sweep measuring the same frame at every position. */
+    uint32_t ck = 0;
+    for (uint32_t i = 0; i < buf.bytesused; i += 4093) ck += frameBuffer[i] + i;
+    mAfFrameCk = ck;
+
     if (mConfig.enableISP && mDemosaic) {
         /* AF metric on LINEAR demosaiced RGB: no AWB gains, no gamma, and AE
            is frozen for the whole scan (no doAutoExposure here) so every
@@ -1270,6 +1278,9 @@ void CameraPipeline::startAfScan() {
     int energies[40];
     int nEng = 0;
     int fails = 0;
+    uint32_t lastCk = 0;
+    int frozen = 0;
+    bool framesFrozen = false;
     for (int pos = sweepMin; pos <= sweepMax; pos += coarseStep) {
         setFocus(pos);
         usleep(settleMs * 1000);
@@ -1283,12 +1294,30 @@ void CameraPipeline::startAfScan() {
             continue;
         }
         fails = 0;
+        /* Identical raw buffers at consecutive positions = the stream is
+         * frozen (stale requeued content): measuring more positions is
+         * pointless, abort and keep the lens where it is. */
+        if (mAfFrameCk == lastCk) {
+            if (++frozen >= 3) { framesFrozen = true; break; }
+        } else {
+            frozen = 0;
+        }
+        lastCk = mAfFrameCk;
         if (nEng < 40) energies[nEng++] = energy;
         ALOGI("AF: coarse pos=%d energy=%d", pos, energy);
         if (energy > bestEnergy) {
             bestEnergy = energy;
             bestPos = pos;
         }
+    }
+
+    if (framesFrozen) {
+        ALOGW("AF: frames frozen (identical buffers), keeping position=%d",
+              mFocusPosition);
+        /* Report LOCKED: the lens holds its last position, and the app
+         * must be allowed to fire takePicture (UNFOCUSED stalls it). */
+        mAfState = 2;
+        return;
     }
 
     /* ---- Fine sweep around best ---- */
@@ -1342,8 +1371,11 @@ void CameraPipeline::startAfScan() {
             ALOGI("AF: scan complete, lock at position=%d energy=%d median=%d",
                   bestPos, bestEnergy, median);
         } else {
-            /* Inconclusive: leave the lens exactly where it was. */
-            if (mAfState != 2) mAfState = 3; // never had a valid lock
+            /* Inconclusive: leave the lens exactly where it was and report
+             * LOCKED. Reporting UNFOCUSED here stalls the app's capture
+             * flow: Stock Camera waits for a focus lock that a flat scene
+             * can never provide, and takePicture is never issued. */
+            mAfState = 2;
             ALOGW("AF: inconclusive (flat contrast best=%d median=%d), keeping position=%d",
                   bestEnergy, median, mFocusPosition);
         }
@@ -1354,7 +1386,9 @@ void CameraPipeline::startAfScan() {
         ALOGI("AF: scan complete (few samples), lock at position=%d energy=%d",
               bestPos, bestEnergy);
     } else {
-        mAfState = 3; // SCAN FAILED (no usable frames)
+        /* No usable frames: report LOCKED at the current position so the
+         * app can still fire takePicture (UNFOCUSED would stall it). */
+        mAfState = 2;
         ALOGE("AF: scan failed, no energy measurements");
     }
 }

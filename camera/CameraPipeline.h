@@ -147,6 +147,7 @@ private:
     int mFocusPosition;
     int mAfState;
     int64_t mAfLastScanNs;
+    uint32_t mAfFrameCk;   // checksum of last AF-scan frame (frozen-frame detection)
 
 public:
     float lastAvgLuma() const { return mLastAvgLuma; }
