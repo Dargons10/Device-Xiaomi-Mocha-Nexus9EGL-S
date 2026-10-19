@@ -10,6 +10,7 @@
 /dev/imx135     0660    media   camera
 /dev/imx214     0660    media   camera
 /dev/imx179     0660    media   camera
+/dev/ad5823     0660    media   camera
 /dev/imx219     0660    media   camera
 /dev/ar0261     0660    media   camera
 # Direct sensor register access from the camera HAL (IMX179 @0x10,

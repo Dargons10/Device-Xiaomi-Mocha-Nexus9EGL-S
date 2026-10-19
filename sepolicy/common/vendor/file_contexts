@@ -52,6 +52,7 @@
 /dev/constraint.*		u:object_r:pmqos_device:s0
 /dev/cpu_freq_max		u:object_r:pmqos_device:s0
 /dev/cpu_freq_min		u:object_r:pmqos_device:s0
+/dev/ad5823		u:object_r:camera_device:s0
 /dev/cy8c-led-boot		u:object_r:cy8c_device:s0
 /dev/emc_freq_min		u:object_r:pmqos_device:s0
 /dev/focuser		u:object_r:camera_device:s0
