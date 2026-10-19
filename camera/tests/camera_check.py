@@ -21,7 +21,15 @@ import sys
 import numpy as np
 from PIL import Image
 
-UMBRAL_2X2 = 0.18   # calibrado con muestras mocha (frontal limpio ~0.01-0.05)
+# Calibracion empirica (mocha, Oct 2026):
+#   LIMPIAS: frontal 720p -0.146 / trasera crop 720p -0.146 /
+#            JPEG nativo 3264 +0.04..+0.05 (lag 0.86-1.66)
+#   AJEDREZ (sintetico patron luminosidad RGGB, contraste 5%):
+#            +0.47 (lag 0.35); contraste 10%: +0.65 (lag 0.21)
+# Margen amplio: umbral 0.18 queda entre +0.06 (peor limpia) y
+# +0.26 (ajedrez tenue); la condicion lag<0.55 evita falsos positivos
+# por textura natural periodica.
+UMBRAL_2X2 = 0.18
 UMBRAL_LAG2 = 0.55
 
 
