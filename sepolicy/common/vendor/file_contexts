@@ -55,6 +55,7 @@
 /dev/cy8c-led-boot		u:object_r:cy8c_device:s0
 /dev/emc_freq_min		u:object_r:pmqos_device:s0
 /dev/focuser		u:object_r:camera_device:s0
+/dev/imx179		u:object_r:camera_device:s0
 /dev/gpu_freq_max		u:object_r:pmqos_device:s0
 /dev/gpu_freq_min		u:object_r:pmqos_device:s0
 /dev/hidraw[0-9]		u:object_r:hidraw_device:s0
@@ -84,6 +85,7 @@
 /dev/nvhost-vic		u:object_r:gpu_device:s0
 /dev/nvgpu(/.*)?	u:object_r:gpu_device:s0
 /dev/nvmap		u:object_r:gpu_device:s0
+/dev/ov5693		u:object_r:camera_device:s0
 /dev/ozwpan		u:object_r:ozmo_device:s0
 /dev/quadd_auth		u:object_r:quadd_auth_device:s0
 /dev/quadd		u:object_r:quadd_device:s0

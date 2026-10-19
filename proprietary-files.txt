@@ -79,7 +79,9 @@ lib/egl/libGLESv1_CM_tegra.so
 lib/egl/libGLESv2_tegra.so
 
 lib/hw/audio_policy.tegra.so
-lib/hw/camera.vendor.tegra.so
+# camera.vendor.tegra.so is NOT extracted as-is: the vendor-tree copy is
+# patchelf-surgery'ed for Android 12 (libmedia/libcameraservice dropped,
+# libmocha_sensor_shim added). Re-extracting would undo the patch.
 lib/hw/keystore.tegra.so
 lib/hw/lights.tegra.so
 lib/hw/sensors.lsm6db0.so:lib/libsensors.lsm6db0.so

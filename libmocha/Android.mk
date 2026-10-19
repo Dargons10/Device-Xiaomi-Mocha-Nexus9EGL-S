@@ -60,10 +60,36 @@ include $(BUILD_SHARED_LIBRARY)
 
 
 include $(CLEAR_VARS)
+LOCAL_SRC_FILES := \
+    sensor.c \
+    fence_metadata_shim.cpp
+
+LOCAL_SHARED_LIBRARIES := \
+    libsensor \
+    libbinder \
+    libcutils \
+    libutils \
+    liblog \
+    libcamera_client
+
+LOCAL_C_INCLUDES += \
+    frameworks/av/camera/include \
+    frameworks/native/libs/sensor/include \
+    system/media/camera/include
+
+LOCAL_MODULE_CLASS := SHARED_LIBRARIES
+LOCAL_MODULE := libmocha_sensor_shim
+LOCAL_MODULE_TAGS := optional
+LOCAL_PROPRIETARY_MODULE := true
+LOCAL_MULTILIB := 32
+include $(BUILD_SHARED_LIBRARY)
+
+include $(CLEAR_VARS)
 LOCAL_SRC_FILES := powerservice_client.c 
 LOCAL_MODULE_CLASS := SHARED_LIBRARIES
 LOCAL_MODULE := libpowerservice_client
 LOCAL_MODULE_TAGS := optional
+LOCAL_PROPRIETARY_MODULE := true
 include $(BUILD_SHARED_LIBRARY)
 
 include $(CLEAR_VARS)

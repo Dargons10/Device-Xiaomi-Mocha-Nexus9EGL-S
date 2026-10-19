@@ -80,7 +80,16 @@ PRODUCT_PACKAGES += \
     android.hardware.camera.provider@2.4-service \
     camera.device@1.0-impl \
     camera.tegra \
+    camera.mocha \
+    libmocha_sensor_shim \
+    libpowerservice_client \
     libshim_camera
+
+# NVIDIA camera blob configuration (the blob reads /etc/nvcamera.conf and
+# /etc/model_frontal.xml = /system/etc at runtime)
+PRODUCT_COPY_FILES += \
+    $(LOCAL_PATH)/camera/nvcamera.conf:system/etc/nvcamera.conf \
+    $(LOCAL_PATH)/camera/model_frontal.xml:system/etc/model_frontal.xml
 
 # ChargerTile
 PRODUCT_PACKAGES += \

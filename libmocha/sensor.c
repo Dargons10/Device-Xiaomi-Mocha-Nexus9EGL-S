@@ -19,7 +19,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <pthread.h>
-#include <log/Log.h>
+#include <log/log.h>
 #include <hardware/power.h>
 #include <hardware/hardware.h>
 
@@ -44,7 +44,9 @@ extern void _ZN7android13SensorManagerD1Ev(void *sensorMgr);
 extern void _ZN7android13SensorManagerC1ERKNS_8String16E(void *sensorMgr, void **str16P);
 
 //android::SensorManager::createEventQueue(android::String8, int)
-extern void _ZN7android13SensorManager16createEventQueueENS_7String8Ei(void **retVal, void *sensorMgr, void **str8P, int mode);
+//android::SensorManager::createEventQueue(const String8&, int32_t pid, const String16&)
+// (Android 11+ takes a third String16 opPackageName parameter)
+extern void _ZN7android13SensorManager16createEventQueueENS_7String8EiNS_8String16E(void **retVal, void *sensorMgr, void **str8P, int pid, void **str16P);
 
 
 //data exports we must provide for camera library to be happy
@@ -117,11 +119,14 @@ void _ZN7android13SensorManagerC1Ev(void *sensorMgr)
  */
 void _ZN7android13SensorManager16createEventQueueEv(void **retVal, void *sensorMgr)
 {
-    void *string;
+    void *string8;
+    void *string16;
 
-    _ZN7android7String8C1EPKc(&string, "");
-    _ZN7android13SensorManager16createEventQueueENS_7String8Ei(retVal, sensorMgr, &string, 0);
-    _ZN7android7String8D1Ev(&string);
+    _ZN7android7String8C1EPKc(&string8, "nvcamera-legacy");
+    _ZN7android8String16C1EPKc(&string16, "camera.tegra");
+    _ZN7android13SensorManager16createEventQueueENS_7String8EiNS_8String16E(retVal, sensorMgr, &string8, -1, &string16);
+    _ZN7android7String8D1Ev(&string8);
+    _ZN7android8String16D1Ev(&string16);
 }
 
 /*
