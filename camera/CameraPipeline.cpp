@@ -611,22 +611,26 @@ int CameraPipeline::startStreaming() {
 
     auto tQbuf = std::chrono::steady_clock::now();
 
-    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (ioctl(mFd, VIDIOC_STREAMON, &type) < 0) return -errno;
-    auto tStreamon = std::chrono::steady_clock::now();
-
     if (mCameraId == 0) {
-        /* Apply exposure/gain AFTER STREAMON: STREAMOFF powers the sensor
-         * down, so pre-STREAMON writes hit an unpowered sensor and time out
-         * (the sensor never ACKs). After STREAMON the kernel has powered and
-         * initialized the sensor, the adapter is warm, and the writes go
-         * through in ~1 ms. The AE loop re-fine-tunes within a few frames. */
+        /* Apply exposure/gain BEFORE STREAMON: the kernel's async s_stream
+         * sequence (chip-ID reads + init-reg burst with NACK retries) holds
+         * the I2C adapter lock for ~2 s, and a write queued behind it blocks
+         * for that whole time. In standby these writes are fast and legal;
+         * s_stream's init table resets exposure, and the AE loop re-applies
+         * it within a few ms once streaming starts.
+         * (Tried AFTER STREAMON in 2ccf924: mid-stream writes to 0x10 stall
+         * the adapter - FIFO fills, packet never completes, s_stream's own
+         * AE writes time out forever and the frame data is all black.) */
         mCurrentExposure = 800;
         mCurrentGain = 60;
         setExposure(mCurrentExposure);
         setGain(mCurrentGain);
         ALOGI("Initial exposure=%d gain=%d", mCurrentExposure, mCurrentGain);
     }
+
+    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (ioctl(mFd, VIDIOC_STREAMON, &type) < 0) return -errno;
+    auto tStreamon = std::chrono::steady_clock::now();
 
     if (mCameraId != 0) {
         /* Front camera: write full OV5693 register table via I2C.

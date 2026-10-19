@@ -1027,7 +1027,9 @@ static int camera_device_configure_streams(const camera3_device_t *device, camer
     mocha::PipelineConfig pipelineConfig;
     pipelineConfig.width = pipelineStream->width;
     pipelineConfig.height = pipelineStream->height;
-    /* IMX179 (back) = SRGGB10 → RGGB(0). OV5693 (front) = SBGGR10 → BGGR(3). */
+    /* IMX179 (back) = SRGGB10 -> RGGB(0) in every mode the kernel driver
+     * reports (S_FMT returns fourcc RG10 for 1280x720 binned AND native).
+     * OV5693 (front) = SBGGR10 -> BGGR(3). */
     pipelineConfig.bayerPattern = (dev->camera_id == 0) ? 0 : 3;
     pipelineConfig.offset_x = 0;
     pipelineConfig.offset_y = 0;
@@ -1576,8 +1578,11 @@ static int camera_device_process_capture_request(const camera3_device_t *device,
 
                 if (outBuf.stream->format == HAL_PIXEL_FORMAT_BLOB) {
                     hasBlobOutput = true;
-                    uint32_t blobW = outBuf.stream->width;
-                    uint32_t blobH = outBuf.stream->height;
+                    /* Force native resolution for still capture: the framework may
+                     * request a smaller JPEG size; we always capture at sensor max
+                     * and downscale in SW if needed (per "no rescaling" policy). */
+                    uint32_t blobW = dev->camera_id == 0 ? 3264 : 1280;
+                    uint32_t blobH = dev->camera_id == 0 ? 2448 : 720;
                     uint32_t rgbaSize = blobW * blobH * 4;
                     if (!dev->temp_rgba || dev->temp_rgba_size < rgbaSize) {
                         if (dev->temp_rgba) free(dev->temp_rgba);
