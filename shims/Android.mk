@@ -7,6 +7,16 @@ $(PROTOBUF_SYMLINK):
 
 ALL_DEFAULT_INSTALLED_MODULES += $(PROTOBUF_SYMLINK)
 
+# Vendor-side alias so the NVIDIA camera stack resolves libcamera_client.so
+# against our legacy-ABI reimplementation (libmocha_camera) instead of the
+# Android 12 system library, which has an incompatible ABI for vendor modules.
+LIBCAMERA_SYMLINK := $(TARGET_OUT_VENDOR)/lib/libcamera_client.so
+$(LIBCAMERA_SYMLINK):
+	$(hide) mkdir -p $(TARGET_OUT_VENDOR)/lib
+	$(hide) ln -sf libmocha_camera.so $@
+
+ALL_DEFAULT_INSTALLED_MODULES += $(LIBCAMERA_SYMLINK)
+
 ## libshim_atomic
 include $(CLEAR_VARS)
 LOCAL_SRC_FILES := atomic.cpp

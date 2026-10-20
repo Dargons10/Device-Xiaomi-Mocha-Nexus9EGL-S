@@ -17,7 +17,7 @@
 
 //#define LOG_NDEBUG 0
 #define LOG_TAG "CameraBase"
-#include <log/Log.h>
+#include <log/log.h>
 #include <utils/threads.h>
 #include <utils/Mutex.h>
 

@@ -81,6 +81,7 @@ PRODUCT_PACKAGES += \
     camera.device@1.0-impl \
     camera.tegra \
     camera.mocha \
+    libmocha_camera \
     libmocha_sensor_shim \
     libpowerservice_client \
     libshim_camera

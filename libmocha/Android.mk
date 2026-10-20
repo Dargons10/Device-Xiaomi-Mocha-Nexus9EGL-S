@@ -45,8 +45,15 @@ LOCAL_C_INCLUDES += \
         system/media/camera/include \
         system/media/private/camera/include
 
+LOCAL_HEADER_LIBRARIES := liblog_headers libsystem_headers libutils_headers
+
 LOCAL_MODULE_CLASS := SHARED_LIBRARIES
 LOCAL_MODULE := libmocha_camera
+# Legacy-ABI camera client reimplementation (Abobo7 design).  The NVIDIA
+# blob camera.vendor.tegra.so is DT_NEEDED-patched (patchelf) to depend on
+# this library instead of the Android 12 system libcamera_client.so.
+LOCAL_PROPRIETARY_MODULE := true
+LOCAL_MULTILIB := 32
 LOCAL_MODULE_TAGS := optional
 include $(BUILD_SHARED_LIBRARY)
 

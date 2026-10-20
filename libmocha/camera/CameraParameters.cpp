@@ -16,7 +16,7 @@
 */
 
 #define LOG_TAG "CameraParams"
-#include <log/Log.h>
+#include <log/log.h>
 
 #include <string.h>
 #include <stdlib.h>
