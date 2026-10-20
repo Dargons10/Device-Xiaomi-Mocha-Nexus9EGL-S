@@ -1,0 +1,41 @@
+From f71230b23dfb5dfdfeae4a9d2b20bf5367820277 Mon Sep 17 00:00:00 2001
+From: Dargons10 <jdamr2p@gmail.com>
+Date: Tue, 20 Oct 2026 11:13:12 +0200
+Subject: [PATCH 3/3] camera: make libcamera_client vendor_available and
+ double_loadable
+
+The NVIDIA Tegra camera vendor blob (camera.vendor.tegra.so, HAL1 wrapper)
+links libcamera_client from the vendor module namespace, so the library
+needs a vendor variant.  double_loadable follows the libaudioclient
+pattern used on treble-legacy devices where vendor and system variants
+coexist in one partition layout.
+
+Co-Authored-By: Dargons10 <jdamr2p@gmail.com>
+---
+ camera/Android.bp | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/camera/Android.bp b/camera/Android.bp
+index 1924e80b78..0c9c4ae8cf 100644
+--- a/camera/Android.bp
++++ b/camera/Android.bp
+@@ -47,6 +47,16 @@ cc_library_shared {
+     name: "libcamera_client",
+     defaults: ["camera_parameter_library_defaults"],
+ 
++    // Legacy (HAL1) vendor camera HALs, e.g. the NVIDIA Tegra camera.tegra
++    // wrapper on mocha, link against libcamera_client from the vendor
++    // module namespace.  On this device the vendor-side soname is provided
++    // by libmocha_camera.so (legacy-ABI reimplementation, device/xiaomi),
++    // symlinked as libcamera_client.so in the vendor image, so no vendor
++    // variant is installed here; the flag only enables the vendor variant
++    // for linking the wrapper module.
++    vendor_available: true,
++    double_loadable: true,
++
+     aidl: {
+         export_aidl_headers: true,
+         local_include_dirs: ["aidl"],
+-- 
+2.47.3
+

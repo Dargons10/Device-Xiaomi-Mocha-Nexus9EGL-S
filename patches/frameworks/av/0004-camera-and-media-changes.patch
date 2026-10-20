@@ -1,12 +1,56 @@
+From dccd0069d7bc5c3fc35fdce024fe5ee8c7711e3c Mon Sep 17 00:00:00 2001
+From: Dargons10 <jdamr2p@gmail.com>
+Date: Wed, 30 Sep 2026 22:17:24 +0200
+Subject: [PATCH 1/3] fix: Tegra124 camera, media, audio, and C2 decoder fixes
+
+Apply Tegra124-specific fixes to the camera, media, audio, and
+C2 decoder stack:
+- C2SoftAacDec/C2SoftAvcDec: stall prevention, YV12-to-RGBA conversion
+- CCodec: increase work duration threshold to 60s
+- C2AllocatorGralloc: Tegra-specific buffer allocation
+- FactoryHalHidl/DevicesFactoryHalHybrid: Tegra audio HAL fixes
+- StagefrightRecorder: Tegra-specific recorder fixes
+- GenericSource/NuPlayerDecoder: Tegra-specific player fixes
+- CameraSource/Camera3Device: Tegra camera fixes
+- MediaCodecSource: Tegra-specific codec source fixes
+- SoftwareRenderer: force RGBA output on Tegra VIC
+- AudioFlinger: Tegra-specific audio fixes
+- SimpleC2Component: Tegra-specific C2 component fixes
+- CCodecBufferChannel: Tegra-specific buffer channel fixes
+- CameraSource.h: Tegra-specific header fixes
+
+Co-authored-by: Qwen3.8-27B-local
+Signed-off-by: Opencode <opencode@opencode.ai>
+---
+ media/codec2/components/aac/C2SoftAacDec.cpp  |  63 ++++++--
+ media/codec2/components/avc/C2SoftAvcDec.cpp  | 138 ++++++++++++++++--
+ media/codec2/components/avc/C2SoftAvcDec.h    |   4 +
+ .../components/base/SimpleC2Component.cpp     |   5 +
+ media/codec2/sfplugin/CCodec.cpp              |   2 +-
+ media/codec2/sfplugin/CCodecBufferChannel.cpp |   4 +
+ media/codec2/vndk/C2AllocatorGralloc.cpp      |  94 +++++-------
+ media/libaudiohal/FactoryHalHidl.cpp          |  10 +-
+ .../impl/DevicesFactoryHalHybrid.cpp          |   7 +-
+ .../StagefrightRecorder.cpp                   |  28 ++++
+ .../nuplayer/GenericSource.cpp                |   3 +
+ .../nuplayer/NuPlayerDecoder.cpp              |   7 +
+ media/libstagefright/CameraSource.cpp         |  57 ++++++--
+ media/libstagefright/MediaCodecSource.cpp     |   9 ++
+ .../colorconversion/SoftwareRenderer.cpp      |  76 +++++++++-
+ .../include/media/stagefright/CameraSource.h  |   2 +-
+ services/audioflinger/AudioFlinger.cpp        |  16 +-
+ .../device3/Camera3Device.cpp                 |  19 ++-
+ 18 files changed, 436 insertions(+), 108 deletions(-)
+
 diff --git a/media/codec2/components/aac/C2SoftAacDec.cpp b/media/codec2/components/aac/C2SoftAacDec.cpp
-index 57cdcd0a9d..e74e8eef0c 100644
+index 57cdcd0a9d..068b71a87a 100644
 --- a/media/codec2/components/aac/C2SoftAacDec.cpp
 +++ b/media/codec2/components/aac/C2SoftAacDec.cpp
 @@ -23,6 +23,7 @@
  #include <numeric>
  
  #include <cutils/properties.h>
-+#include <system/time.h>
++#include <utils/Timers.h>
  #include <media/stagefright/foundation/MediaDefs.h>
  #include <media/stagefright/foundation/hexdump.h>
  #include <media/stagefright/MediaErrors.h>
@@ -551,10 +595,10 @@ index 6a7f19cc2b..2099357e71 100644
          }
  
 diff --git a/media/libaudiohal/FactoryHalHidl.cpp b/media/libaudiohal/FactoryHalHidl.cpp
-index e420d079b8..b63c295269 100644
+index 7228b221b9..5d59ade5c0 100644
 --- a/media/libaudiohal/FactoryHalHidl.cpp
 +++ b/media/libaudiohal/FactoryHalHidl.cpp
-@@ -94,13 +94,21 @@ bool hasHalService(const std::string& package, const std::string& version,
+@@ -95,13 +95,21 @@ bool hasHalService(const std::string& package, const std::string& version,
  }  // namespace
  
  void* createPreferredImpl(const std::string& package, const std::string& interface) {
@@ -603,7 +647,7 @@ index cde8d85e87..38128e152b 100644
  
  } // namespace android
 diff --git a/media/libmediaplayerservice/StagefrightRecorder.cpp b/media/libmediaplayerservice/StagefrightRecorder.cpp
-index 209b1f8036..8d49ed5c00 100644
+index d72b0b2332..e8cdeace07 100644
 --- a/media/libmediaplayerservice/StagefrightRecorder.cpp
 +++ b/media/libmediaplayerservice/StagefrightRecorder.cpp
 @@ -16,6 +16,7 @@
@@ -651,7 +695,7 @@ index 209b1f8036..8d49ed5c00 100644
              break;
          }
  
-@@ -2166,12 +2186,14 @@ status_t StagefrightRecorder::setupMPEG4orWEBMRecording() {
+@@ -2167,12 +2187,14 @@ status_t StagefrightRecorder::setupMPEG4orWEBMRecording() {
  
          sp<MediaSource> mediaSource;
          err = setupMediaSource(&mediaSource);
@@ -666,7 +710,7 @@ index 209b1f8036..8d49ed5c00 100644
          if (err != OK) {
              return err;
          }
-@@ -2188,6 +2210,12 @@ status_t StagefrightRecorder::setupMPEG4orWEBMRecording() {
+@@ -2189,6 +2211,12 @@ status_t StagefrightRecorder::setupMPEG4orWEBMRecording() {
      const bool disableAudio = mCaptureFpsEnable && mCaptureFps < mFrameRate;
      if (!disableAudio && mAudioSource != AUDIO_SOURCE_CNT) {
          err = setupAudioEncoder(writer);
@@ -740,10 +784,10 @@ index 2c1f158eda..1bcbb27f9c 100644
              err = mCodec->queueSecureInputBuffer(
                      bufferIx,
 diff --git a/media/libstagefright/CameraSource.cpp b/media/libstagefright/CameraSource.cpp
-index 95afa62620..99fad6b6b5 100644
+index 08b618384b..aaefc7784c 100644
 --- a/media/libstagefright/CameraSource.cpp
 +++ b/media/libstagefright/CameraSource.cpp
-@@ -260,29 +260,49 @@ status_t CameraSource::isCameraColorFormatSupported(
+@@ -366,29 +366,49 @@ static int32_t getHighSpeedFrameRate(const CameraParameters& params) {
   */
  status_t CameraSource::configureCamera(
          CameraParameters* params,
@@ -803,7 +847,7 @@ index 95afa62620..99fad6b6b5 100644
          return BAD_VALUE;
      } else {  // width == -1 && height == -1
          // Do not configure the camera.
-@@ -544,9 +564,10 @@ status_t CameraSource::initWithCameraAccess(
+@@ -659,9 +679,10 @@ status_t CameraSource::initWithCameraAccess(
      }
  
      // Set the camera to use the requested video frame size
@@ -816,7 +860,7 @@ index 95afa62620..99fad6b6b5 100644
                      frameRate))) {
          return err;
      }
-@@ -907,6 +928,11 @@ status_t CameraSource::read(
+@@ -1129,6 +1150,11 @@ status_t CameraSource::read(
          //       Either document why it is safe in this case or address the
          //       issue (e.g. by copying).
          *buffer = new MediaBuffer(frame->unsecurePointer(), frame->size());
@@ -828,7 +872,7 @@ index 95afa62620..99fad6b6b5 100644
          (*buffer)->setObserver(this);
          (*buffer)->add_ref();
          (*buffer)->meta_data().setInt64(kKeyTime, frameTime);
-@@ -1055,8 +1081,13 @@ void CameraSource::processBufferQueueFrame(BufferItem& buffer) {
+@@ -1423,8 +1449,13 @@ void CameraSource::processBufferQueueFrame(BufferItem& buffer) {
          (uint8_t*)heap->getBase() + offset);
      memset(payload, 0, sizeof(VideoNativeMetadata));
      payload->eType = kMetadataBufferTypeANWBuffer;
@@ -870,11 +914,144 @@ index 0107c322cd..0b8a2846d1 100644
          if (!inputFormat->findInt32("android._dataspace", &mEncoderDataSpace)) {
              mEncoderDataSpace = kDefaultVideoEncoderDataSpace;
          }
+diff --git a/media/libstagefright/colorconversion/SoftwareRenderer.cpp b/media/libstagefright/colorconversion/SoftwareRenderer.cpp
+index 4711315615..7f1c27532d 100644
+--- a/media/libstagefright/colorconversion/SoftwareRenderer.cpp
++++ b/media/libstagefright/colorconversion/SoftwareRenderer.cpp
+@@ -19,6 +19,7 @@
+ 
+ #include "../include/SoftwareRenderer.h"
+ #include <cutils/properties.h> // for property_get
++#include <string.h>
+ #include <media/stagefright/foundation/ADebug.h>
+ #include <media/stagefright/foundation/AMessage.h>
+ #include <media/stagefright/foundation/ColorUtils.h>
+@@ -127,6 +128,14 @@ void SoftwareRenderer::resetFormatIfChanged(
+     size_t bufWidth = mCropWidth;
+     size_t bufHeight = mCropHeight;
+ 
++    // Tegra VIC converts YUV buffers through its blit pipeline; the
++    // DdkVicLockSurface path fails to acquire fences (error 0x3000f) with
++    // software-decoder output, yielding corrupted (purple) frames. On Tegra
++    // boards, convert YUV to RGBA in the ColorConverter instead.
++    char platform[PROPERTY_VALUE_MAX] = {0};
++    property_get("ro.board.platform", platform, "");
++    bool tegraRgbaOutput = (strcmp(platform, "tegra") == 0);
++
+     // hardware has YUV12 and RGBA8888 support, so convert known formats
+     {
+         switch (mColorFormat) {
+@@ -134,7 +143,11 @@ void SoftwareRenderer::resetFormatIfChanged(
+             case OMX_COLOR_FormatYUV420SemiPlanar:
+             case OMX_TI_COLOR_FormatYUV420PackedSemiPlanar:
+             {
+-                halFormat = HAL_PIXEL_FORMAT_YV12;
++                if (tegraRgbaOutput) {
++                    halFormat = HAL_PIXEL_FORMAT_RGBA_8888;
++                } else {
++                    halFormat = HAL_PIXEL_FORMAT_YV12;
++                }
+                 bufWidth = (mCropWidth + 1) & ~1;
+                 bufHeight = (mCropHeight + 1) & ~1;
+                 break;
+@@ -181,6 +194,10 @@ void SoftwareRenderer::resetFormatIfChanged(
+         mConverter = new ColorConverter(
+                 mColorFormat, OMX_COLOR_Format16bitRGB565);
+         CHECK(mConverter->isValid());
++    } else if (halFormat == HAL_PIXEL_FORMAT_RGBA_8888) {
++        mConverter = new ColorConverter(
++                mColorFormat, OMX_COLOR_Format32BitRGBA8888);
++        CHECK(mConverter->isValid());
+     } else if (halFormat == HAL_PIXEL_FORMAT_RGBA_1010102) {
+         mConverter = new ColorConverter(
+                 mColorFormat, OMX_COLOR_FormatYUV444Y410);
+@@ -276,24 +293,65 @@ std::list<FrameRenderTracker::Info> SoftwareRenderer::render(
+ 
+     void *dst = NULL;
+     struct android_ycbcr ycbcr;
++    bool ycbcrLocked = false;
+     if ( !mConverter &&
+          (mColorFormat == OMX_COLOR_FormatYUV420Planar ||
+          mColorFormat == OMX_COLOR_FormatYUV420SemiPlanar ||
+          mColorFormat == OMX_TI_COLOR_FormatYUV420PackedSemiPlanar ||
+          mColorFormat == OMX_COLOR_FormatYUV420Planar16)) {
+-        CHECK_EQ(0, mapper.lockYCbCr(buf->handle,
++        int lockErr = mapper.lockYCbCr(buf->handle,
+                 GRALLOC_USAGE_SW_READ_NEVER | GRALLOC_USAGE_SW_WRITE_RARELY,
+-                bounds, &ycbcr));
+-    } else {
+-        CHECK_EQ(0, mapper.lock(buf->handle,
++                bounds, &ycbcr);
++        if (lockErr == 0) {
++            ycbcrLocked = true;
++        } else {
++            ALOGW("lockYCbCr failed (%d), falling back to RGB lock", lockErr);
++            memset(&ycbcr, 0, sizeof(ycbcr));
++        }
++    }
++    if (!ycbcrLocked) {
++        int lockErr = mapper.lock(buf->handle,
+                 GRALLOC_USAGE_SW_READ_NEVER | GRALLOC_USAGE_SW_WRITE_RARELY,
+-                bounds, &dst));
++                bounds, &dst);
++        CHECK_EQ(0, lockErr);
++
++        // On Tegra, lockYCbCr() fails ("unknown shadow format") even though the
++        // buffer is YV12 (set in resetFormatIfChanged). lock() returns the raw
++        // YV12 base pointer, so populate the Y/U/V planes manually and let the
++        // existing planar YUV copy path below do the work. Using a ColorConverter
++        // here would treat the YUV buffer as RGBA and write out of bounds.
++        if (mColorFormat == OMX_COLOR_FormatYUV420Planar &&
++            buf->format == HAL_PIXEL_FORMAT_YV12) {
++            uint8_t *base = (uint8_t *)dst;
++            size_t stride = (size_t)buf->stride;
++            size_t height = (size_t)buf->height;
++            size_t cstride = stride / 2;
++            ycbcr.y = base;
++            ycbcr.ystride = stride;
++            ycbcr.cb = base + stride * height;
++            ycbcr.cr = base + stride * height + cstride * (height / 2);
++            ycbcr.cstride = cstride;
++            ycbcr.chroma_step = 1;
++            ycbcrLocked = true;
++            ALOGV("manual YV12 planes: y=%p cb=%p cr=%p ystride=%zu cstride=%zu",
++                  ycbcr.y, ycbcr.cb, ycbcr.cr, ycbcr.ystride, ycbcr.cstride);
++        }
+     }
+ 
+     // TODO move the other conversions also into ColorConverter, and
+     // fix cropping issues (when mCropLeft/Top != 0 or mWidth != mCropWidth)
+-    if (mConverter) {
+-        mConverter->convert(
++    ColorConverter *fallbackConverter = NULL;
++    if (!ycbcrLocked && !mConverter &&
++         (mColorFormat == OMX_COLOR_FormatYUV420Planar ||
++          mColorFormat == OMX_COLOR_FormatYUV420SemiPlanar ||
++          mColorFormat == OMX_TI_COLOR_FormatYUV420PackedSemiPlanar ||
++          mColorFormat == OMX_COLOR_FormatYUV420Planar16)) {
++        fallbackConverter = new ColorConverter(
++                mColorFormat, OMX_COLOR_Format32BitRGBA8888);
++    }
++    ColorConverter *activeConverter = mConverter ? mConverter : fallbackConverter;
++    if (activeConverter) {
++        activeConverter->convert(
+                 data,
+                 mWidth, mHeight, mStride,
+                 mCropLeft, mCropTop, mCropRight, mCropBottom,
+@@ -418,6 +476,8 @@ std::list<FrameRenderTracker::Info> SoftwareRenderer::render(
+         LOG_ALWAYS_FATAL("bad color format %#x", mColorFormat);
+     }
+ 
++    delete fallbackConverter;
++
+ skip_copying:
+     CHECK_EQ(0, mapper.unlock(buf->handle));
+ 
 diff --git a/media/libstagefright/include/media/stagefright/CameraSource.h b/media/libstagefright/include/media/stagefright/CameraSource.h
-index e8770ed6c0..8c16759945 100644
+index efdfa02be5..6f6e5c4f0d 100644
 --- a/media/libstagefright/include/media/stagefright/CameraSource.h
 +++ b/media/libstagefright/include/media/stagefright/CameraSource.h
-@@ -265,7 +265,7 @@ private:
+@@ -318,7 +318,7 @@ private:
  
      status_t isCameraColorFormatSupported(const CameraParameters& params);
      status_t configureCamera(CameraParameters* params,
@@ -958,3 +1135,6 @@ index 8f080bec87..7e92c3290a 100644
              }
          } else {
              bool needFormatOverride =
+-- 
+2.47.3
+

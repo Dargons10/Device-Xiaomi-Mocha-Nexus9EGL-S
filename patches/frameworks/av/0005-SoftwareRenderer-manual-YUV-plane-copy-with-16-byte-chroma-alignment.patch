@@ -1,0 +1,249 @@
+From 523974424a7771d629c17ab9dd798f0c24b98378 Mon Sep 17 00:00:00 2001
+From: Dargons10 <jdamr2p@gmail.com>
+Date: Thu, 1 Oct 2026 14:56:39 +0200
+Subject: [PATCH 2/3] fix: SoftwareRenderer manual YUV plane copy with 16-byte
+ chroma alignment
+
+Replace lockYCbCr/initDstYUV path with direct mapper.lock and manual
+Y/U/V plane pointer arithmetic. The Tegra124 gralloc driver does not
+support lockYCbCr for YV12 shadow buffers, and the chroma plane stride
+must be 16-byte aligned (ALIGN(stride/2, 16)) for correct memcpy
+boundaries. Without this, video playback produces corrupted frames.
+
+This restores the libstageftight fix that was previously in
+patches/frameworks/av.disabled/ but not being applied.
+
+Co-authored-by: Qwen3.8-27B-local
+Signed-off-by: Opencode <opencode@opencode.ai>
+---
+ .../colorconversion/SoftwareRenderer.cpp      | 144 ++++++------------
+ 1 file changed, 45 insertions(+), 99 deletions(-)
+
+diff --git a/media/libstagefright/colorconversion/SoftwareRenderer.cpp b/media/libstagefright/colorconversion/SoftwareRenderer.cpp
+index 7f1c27532d..e01b96950e 100644
+--- a/media/libstagefright/colorconversion/SoftwareRenderer.cpp
++++ b/media/libstagefright/colorconversion/SoftwareRenderer.cpp
+@@ -32,14 +32,9 @@
+ 
+ namespace android {
+ 
+-inline void initDstYUV(
+-        const android_ycbcr &ycbcr, int32_t cropTop, int32_t cropLeft,
+-        uint8_t **dst_y, uint8_t **dst_u, uint8_t **dst_v) {
+-    *dst_y = (uint8_t *)ycbcr.y + cropTop * ycbcr.ystride + cropLeft;
+-
+-    int32_t c_offset = (cropTop / 2) * ycbcr.cstride + cropLeft / 2;
+-    *dst_v = (uint8_t *)ycbcr.cr + c_offset;
+-    *dst_u = (uint8_t *)ycbcr.cb + c_offset;
++static int ALIGN(int x, int y) {
++    // y must be a power of 2.
++    return (x + y - 1) & ~(y - 1);
+ }
+ 
+ SoftwareRenderer::SoftwareRenderer(
+@@ -291,67 +286,15 @@ std::list<FrameRenderTracker::Info> SoftwareRenderer::render(
+ 
+     Rect bounds(mCropWidth, mCropHeight);
+ 
+-    void *dst = NULL;
+-    struct android_ycbcr ycbcr;
+-    bool ycbcrLocked = false;
+-    if ( !mConverter &&
+-         (mColorFormat == OMX_COLOR_FormatYUV420Planar ||
+-         mColorFormat == OMX_COLOR_FormatYUV420SemiPlanar ||
+-         mColorFormat == OMX_TI_COLOR_FormatYUV420PackedSemiPlanar ||
+-         mColorFormat == OMX_COLOR_FormatYUV420Planar16)) {
+-        int lockErr = mapper.lockYCbCr(buf->handle,
+-                GRALLOC_USAGE_SW_READ_NEVER | GRALLOC_USAGE_SW_WRITE_RARELY,
+-                bounds, &ycbcr);
+-        if (lockErr == 0) {
+-            ycbcrLocked = true;
+-        } else {
+-            ALOGW("lockYCbCr failed (%d), falling back to RGB lock", lockErr);
+-            memset(&ycbcr, 0, sizeof(ycbcr));
+-        }
+-    }
+-    if (!ycbcrLocked) {
+-        int lockErr = mapper.lock(buf->handle,
+-                GRALLOC_USAGE_SW_READ_NEVER | GRALLOC_USAGE_SW_WRITE_RARELY,
+-                bounds, &dst);
+-        CHECK_EQ(0, lockErr);
+-
+-        // On Tegra, lockYCbCr() fails ("unknown shadow format") even though the
+-        // buffer is YV12 (set in resetFormatIfChanged). lock() returns the raw
+-        // YV12 base pointer, so populate the Y/U/V planes manually and let the
+-        // existing planar YUV copy path below do the work. Using a ColorConverter
+-        // here would treat the YUV buffer as RGBA and write out of bounds.
+-        if (mColorFormat == OMX_COLOR_FormatYUV420Planar &&
+-            buf->format == HAL_PIXEL_FORMAT_YV12) {
+-            uint8_t *base = (uint8_t *)dst;
+-            size_t stride = (size_t)buf->stride;
+-            size_t height = (size_t)buf->height;
+-            size_t cstride = stride / 2;
+-            ycbcr.y = base;
+-            ycbcr.ystride = stride;
+-            ycbcr.cb = base + stride * height;
+-            ycbcr.cr = base + stride * height + cstride * (height / 2);
+-            ycbcr.cstride = cstride;
+-            ycbcr.chroma_step = 1;
+-            ycbcrLocked = true;
+-            ALOGV("manual YV12 planes: y=%p cb=%p cr=%p ystride=%zu cstride=%zu",
+-                  ycbcr.y, ycbcr.cb, ycbcr.cr, ycbcr.ystride, ycbcr.cstride);
+-        }
+-    }
++    void *dst;
++    CHECK_EQ(0, mapper.lock(buf->handle,
++            GRALLOC_USAGE_SW_READ_NEVER | GRALLOC_USAGE_SW_WRITE_RARELY,
++            bounds, &dst));
+ 
+     // TODO move the other conversions also into ColorConverter, and
+     // fix cropping issues (when mCropLeft/Top != 0 or mWidth != mCropWidth)
+-    ColorConverter *fallbackConverter = NULL;
+-    if (!ycbcrLocked && !mConverter &&
+-         (mColorFormat == OMX_COLOR_FormatYUV420Planar ||
+-          mColorFormat == OMX_COLOR_FormatYUV420SemiPlanar ||
+-          mColorFormat == OMX_TI_COLOR_FormatYUV420PackedSemiPlanar ||
+-          mColorFormat == OMX_COLOR_FormatYUV420Planar16)) {
+-        fallbackConverter = new ColorConverter(
+-                mColorFormat, OMX_COLOR_Format32BitRGBA8888);
+-    }
+-    ColorConverter *activeConverter = mConverter ? mConverter : fallbackConverter;
+-    if (activeConverter) {
+-        activeConverter->convert(
++    if (mConverter) {
++        mConverter->convert(
+                 data,
+                 mWidth, mHeight, mStride,
+                 mCropLeft, mCropTop, mCropRight, mCropBottom,
+@@ -362,83 +305,88 @@ std::list<FrameRenderTracker::Info> SoftwareRenderer::render(
+         const uint8_t *src_y = (const uint8_t *)data + mCropTop * mStride + mCropLeft;
+         const uint8_t *src_u = (const uint8_t *)data + mStride * mHeight + mCropTop * mStride / 4;
+         const uint8_t *src_v = (const uint8_t *)src_u + mStride * mHeight / 4;
+-
+-        uint8_t *dst_y, *dst_u, *dst_v;
+-        initDstYUV(ycbcr, mCropTop, mCropLeft, &dst_y, &dst_u, &dst_v);
+-
++        uint8_t *dst_y = (uint8_t *)dst;
++        size_t dst_y_size = buf->stride * buf->height;
++        size_t dst_c_stride = ALIGN(buf->stride / 2, 16);
++        size_t dst_c_size = dst_c_stride * buf->height / 2;
++        uint8_t *dst_v = dst_y + dst_y_size;
++        uint8_t *dst_u = dst_v + dst_c_size;
++        dst_y += mCropTop * buf->stride + mCropLeft;
++        dst_v += (mCropTop/2) * dst_c_stride + mCropLeft/2;
++        dst_u += (mCropTop/2) * dst_c_stride + mCropLeft/2;
+         for (int y = 0; y < mCropHeight; ++y) {
+             memcpy(dst_y, src_y, mCropWidth);
+-
+             src_y += mStride;
+-            dst_y += ycbcr.ystride;
++            dst_y += buf->stride;
+         }
+-
+         for (int y = 0; y < (mCropHeight + 1) / 2; ++y) {
+             memcpy(dst_u, src_u, (mCropWidth + 1) / 2);
+             memcpy(dst_v, src_v, (mCropWidth + 1) / 2);
+-
+             src_u += mStride / 2;
+             src_v += mStride / 2;
+-            dst_u += ycbcr.cstride;
+-            dst_v += ycbcr.cstride;
++            dst_u += dst_c_stride;
++            dst_v += dst_c_stride;
+         }
+     } else if (mColorFormat == OMX_COLOR_FormatYUV420Planar16) {
+         const uint8_t *src_y = (const uint8_t *)data + mCropTop * mStride + mCropLeft * 2;
+         const uint8_t *src_u = (const uint8_t *)data + mStride * mHeight + mCropTop * mStride / 4;
+         const uint8_t *src_v = (const uint8_t *)src_u + mStride * mHeight / 4;
+-
+-        uint8_t *dst_y, *dst_u, *dst_v;
+-        initDstYUV(ycbcr, mCropTop, mCropLeft, &dst_y, &dst_u, &dst_v);
+-
++        uint8_t *dst_y = (uint8_t *)dst;
++        size_t dst_y_size = buf->stride * buf->height;
++        size_t dst_c_stride = ALIGN(buf->stride / 2, 16);
++        size_t dst_c_size = dst_c_stride * buf->height / 2;
++        uint8_t *dst_v = dst_y + dst_y_size;
++        uint8_t *dst_u = dst_v + dst_c_size;
++        dst_y += mCropTop * buf->stride + mCropLeft;
++        dst_v += (mCropTop / 2) * dst_c_stride + mCropLeft / 2;
++        dst_u += (mCropTop / 2) * dst_c_stride + mCropLeft / 2;
+         for (int y = 0; y < mCropHeight; ++y) {
+             for (int x = 0; x < mCropWidth; ++x) {
+                 dst_y[x] = (uint8_t)(((uint16_t *)src_y)[x] >> 2);
+             }
+-
+             src_y += mStride;
+-            dst_y += ycbcr.ystride;
++            dst_y += buf->stride;
+         }
+-
+         for (int y = 0; y < (mCropHeight + 1) / 2; ++y) {
+             for (int x = 0; x < (mCropWidth + 1) / 2; ++x) {
+                 dst_u[x] = (uint8_t)(((uint16_t *)src_u)[x] >> 2);
+                 dst_v[x] = (uint8_t)(((uint16_t *)src_v)[x] >> 2);
+             }
+-
+             src_u += mStride / 2;
+             src_v += mStride / 2;
+-            dst_u += ycbcr.cstride;
+-            dst_v += ycbcr.cstride;
++            dst_u += dst_c_stride;
++            dst_v += dst_c_stride;
+         }
+     } else if (mColorFormat == OMX_TI_COLOR_FormatYUV420PackedSemiPlanar
+             || mColorFormat == OMX_COLOR_FormatYUV420SemiPlanar) {
+         const uint8_t *src_y = (const uint8_t *)data;
+         const uint8_t *src_uv = (const uint8_t *)data
+                 + mWidth * mHeight;
+-
+         src_y += mCropLeft + mCropTop * mWidth;
+         src_uv += (mCropLeft + mCropTop * mWidth) / 2;
+-
+-        uint8_t *dst_y, *dst_u, *dst_v;
+-        initDstYUV(ycbcr, mCropTop, mCropLeft, &dst_y, &dst_u, &dst_v);
+-
++        uint8_t *dst_y = (uint8_t *)dst;
++        size_t dst_y_size = buf->stride * buf->height;
++        size_t dst_c_stride = ALIGN(buf->stride / 2, 16);
++        size_t dst_c_size = dst_c_stride * buf->height / 2;
++        uint8_t *dst_v = dst_y + dst_y_size;
++        uint8_t *dst_u = dst_v + dst_c_size;
++        dst_y += mCropTop * buf->stride + mCropLeft;
++        dst_v += (mCropTop/2) * dst_c_stride + mCropLeft/2;
++        dst_u += (mCropTop/2) * dst_c_stride + mCropLeft/2;
+         for (int y = 0; y < mCropHeight; ++y) {
+             memcpy(dst_y, src_y, mCropWidth);
+-
+             src_y += mWidth;
+-            dst_y += ycbcr.ystride;
++            dst_y += buf->stride;
+         }
+-
+         for (int y = 0; y < (mCropHeight + 1) / 2; ++y) {
+             size_t tmp = (mCropWidth + 1) / 2;
+             for (size_t x = 0; x < tmp; ++x) {
+                 dst_u[x] = src_uv[2 * x];
+                 dst_v[x] = src_uv[2 * x + 1];
+             }
+-
+             src_uv += mWidth;
+-            dst_u += ycbcr.cstride;
+-            dst_v += ycbcr.cstride;
++            dst_u += dst_c_stride;
++            dst_v += dst_c_stride;
+         }
+     } else if (mColorFormat == OMX_COLOR_Format24bitRGB888) {
+         uint8_t* srcPtr = (uint8_t*)data + mWidth * mCropTop * 3 + mCropLeft * 3;
+@@ -476,8 +424,6 @@ std::list<FrameRenderTracker::Info> SoftwareRenderer::render(
+         LOG_ALWAYS_FATAL("bad color format %#x", mColorFormat);
+     }
+ 
+-    delete fallbackConverter;
+-
+ skip_copying:
+     CHECK_EQ(0, mapper.unlock(buf->handle));
+ 
+-- 
+2.47.3
+
