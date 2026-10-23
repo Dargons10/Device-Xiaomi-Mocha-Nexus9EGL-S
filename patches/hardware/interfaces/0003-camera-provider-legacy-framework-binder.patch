@@ -1,0 +1,22 @@
+diff --git a/camera/provider/2.4/default/service.cpp b/camera/provider/2.4/default/service.cpp
+index 0a4f7874a..34d02f532 100644
+--- a/camera/provider/2.4/default/service.cpp
++++ b/camera/provider/2.4/default/service.cpp
+@@ -40,9 +40,14 @@ const bool kLazyService = false;
+ int main()
+ {
+     ALOGI("CameraProvider@2.4 legacy service is starting.");
+-    // The camera HAL may communicate to other vendor components via
+-    // /dev/vndbinder
+-    android::ProcessState::initWithDriver("/dev/vndbinder");
++    // Stock Tegra camera HALs link libgui/libbinder directly and reach
++    // SurfaceFlinger and SensorManager through the framework binder domain.
++    // Opt them into /dev/binder; other configurations keep /dev/vndbinder.
++    if (property_get_bool("ro.camera.legacy_system_binder", false)) {
++        android::ProcessState::initWithDriver("/dev/binder");
++    } else {
++        android::ProcessState::initWithDriver("/dev/vndbinder");
++    }
+ 
+     // b/166675194
+     if (property_get_bool("ro.vendor.camera.provider24.disable_mem_init", false)) {

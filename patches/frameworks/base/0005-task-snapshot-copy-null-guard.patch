@@ -1,0 +1,17 @@
+diff --git a/services/core/java/com/android/server/wm/TaskSnapshotPersister.java b/services/core/java/com/android/server/wm/TaskSnapshotPersister.java
+index 9fbcd7cc5d84..ee751c323697 100644
+--- a/services/core/java/com/android/server/wm/TaskSnapshotPersister.java
++++ b/services/core/java/com/android/server/wm/TaskSnapshotPersister.java
+@@ -415,6 +415,12 @@ class TaskSnapshotPersister {
+             }
+ 
+             final Bitmap swBitmap = bitmap.copy(Config.ARGB_8888, false /* isMutable */);
++            if (swBitmap == null) {
++                // Hardware readback can fail transiently on legacy EGL drivers;
++                // skip persisting this snapshot instead of crashing.
++                Slog.e(TAG, "Failed to copy task snapshot to a software bitmap");
++                return false;
++            }
+ 
+             final File file = getHighResolutionBitmapFile(mTaskId, mUserId);
+             try {

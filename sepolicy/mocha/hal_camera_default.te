@@ -19,6 +19,15 @@
 # sensors service to provide the accelerometer/gyro used for EIS.
 allow hal_camera_default sensors_service:service_manager find;
 
+# Legacy binder mode (ro.camera.legacy_system_binder=true): the provider
+# process opens /dev/binder instead of /dev/vndbinder, registers its HIDL
+# services on the framework servicemanager and (through libgui/libbinder
+# inside the NVIDIA blob) talks to SurfaceFlinger.
+binder_use(hal_camera_default)
+allow hal_camera_default servicemanager:service_manager find;
+allow hal_camera_default surfaceflinger:service_manager find;
+binder_call(hal_camera_default, surfaceflinger)
+
 # The blob reads /etc/nvcamera.conf and /etc/model_frontal.xml
 # (= /system/etc) at init.
 r_dir_file(hal_camera_default, system_file)

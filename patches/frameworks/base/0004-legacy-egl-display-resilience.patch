@@ -1,0 +1,30 @@
+diff --git a/libs/hwui/renderthread/EglManager.cpp b/libs/hwui/renderthread/EglManager.cpp
+index c7d7a17a23eb..c4abaf85de0b 100644
+--- a/libs/hwui/renderthread/EglManager.cpp
++++ b/libs/hwui/renderthread/EglManager.cpp
+@@ -34,6 +34,14 @@
+ 
+ #define GLES_VERSION 2
+ 
++// Tegra's default display cannot be rebuilt after eglTerminate followed by
++// eglReleaseThread. Keep only the thread state; still release the display,
++// context and pbuffer on trim. Other drivers retain the upstream teardown.
++static bool eglSkipReleaseThread() {
++    static bool value = property_get_bool("ro.egl.skip_release_thread", false);
++    return value;
++}
++
+ // Android-specific addition that is used to show when frames began in systrace
+ EGLAPI void EGLAPIENTRY eglBeginFrame(EGLDisplay dpy, EGLSurface surface);
+ 
+@@ -446,7 +454,9 @@ void EglManager::destroy() {
+     }
+     eglMakeCurrent(mEglDisplay, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+     eglTerminate(mEglDisplay);
+-    eglReleaseThread();
++    if (!eglSkipReleaseThread()) {
++        eglReleaseThread();
++    }
+ 
+     mEglDisplay = EGL_NO_DISPLAY;
+     mEglContext = EGL_NO_CONTEXT;

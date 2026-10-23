@@ -82,6 +82,17 @@ PRODUCT_PROPERTY_OVERRIDES += \
     persist.sf.force_gpu_composition=1 \
     debug.renderengine.backend=threaded
 
+# Legacy NVIDIA EGL stack: eglDestroyDisplay/eglReleaseThread crash on
+# shutdown paths (egl_display_t::initialize strstr). Skip the release thread.
+PRODUCT_PROPERTY_OVERRIDES += \
+    ro.egl.skip_release_thread=true
+
+# Camera
+# Stock Tegra camera HAL blob reaches SurfaceFlinger/legacy services through
+# the framework binder domain; opt the HIDL provider process into /dev/binder.
+PRODUCT_PROPERTY_OVERRIDES += \
+    ro.camera.legacy_system_binder=true
+
 # Lineage genuine
 PRODUCT_PROPERTY_OVERRIDES += \
     persist.lineage.nofool=true

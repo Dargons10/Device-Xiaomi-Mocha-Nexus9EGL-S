@@ -1,0 +1,49 @@
+diff --git a/graphics/mapper/2.0/utils/passthrough/include/mapper-passthrough/2.0/Gralloc0Hal.h b/graphics/mapper/2.0/utils/passthrough/include/mapper-passthrough/2.0/Gralloc0Hal.h
+index 7369ac759..e1ae2c497 100644
+--- a/graphics/mapper/2.0/utils/passthrough/include/mapper-passthrough/2.0/Gralloc0Hal.h
++++ b/graphics/mapper/2.0/utils/passthrough/include/mapper-passthrough/2.0/Gralloc0Hal.h
+@@ -21,6 +21,7 @@
+ 
+ #include <inttypes.h>
+ 
++#include <dlfcn.h>
+ #include <hardware/gralloc.h>
+ #include <log/log.h>
+ #include <mapper-hal/2.0/MapperHal.h>
+@@ -45,6 +46,13 @@ class Gralloc0HalImpl : public Hal {
+     bool initWithModule(const hw_module_t* module) {
+         mModule = reinterpret_cast<const gralloc_module_t*>(module);
+         mMinor = module->module_api_version & 0xff;
++        // Stock Tegra HWC retains handles with registerBuffer. Its free entry
++        // marks deletion pending and lets the last unregister close/free them.
++        // Closing the handle here would invalidate HWC's live reference.
++        if (module->dso) {
++            mNvGrFreeInternal = reinterpret_cast<NvGrFreeInternal>(
++                dlsym(module->dso, "NvGrFreeInternal"));
++        }
+         return true;
+     }
+ 
+@@ -92,6 +100,13 @@ class Gralloc0HalImpl : public Hal {
+     }
+ 
+     Error freeBuffer(native_handle_t* bufferHandle) override {
++        if (mNvGrFreeInternal) {
++            if (mNvGrFreeInternal(mModule, bufferHandle)) {
++                return Error::BAD_BUFFER;
++            }
++            return Error::NONE;
++        }
++
+         if (mModule->unregisterBuffer(mModule, bufferHandle)) {
+             return Error::BAD_BUFFER;
+         }
+@@ -200,6 +215,8 @@ class Gralloc0HalImpl : public Hal {
+ 
+     const gralloc_module_t* mModule = nullptr;
+     uint8_t mMinor = 0;
++    using NvGrFreeInternal = int (*)(const gralloc_module_t*, buffer_handle_t);
++    NvGrFreeInternal mNvGrFreeInternal = nullptr;
+ };
+ 
+ }  // namespace detail
