@@ -1,0 +1,22 @@
+// libFaceProc stub - replaces vendor blob libFaceProc.so to avoid TEXTREL
+// libbeautify.so DT_NEEDEDs libFaceProc.so; this stub provides the 4
+// required symbols returning failure to gracefully disable beautify/FD.
+
+cc_library_shared {
+    name: "libFaceProc",
+    vendor: false,  // installs to /system/lib (not /vendor/lib)
+    srcs: ["libFaceProc_stub.c"],
+    cflags: [
+        "-Wall",
+        "-Werror",
+        "-fvisibility=hidden",
+    ],
+    // Export only the required symbols
+    export_include_dirs: [],
+    // Force 32-bit for mocha (Tegra124 is 32-bit)
+    compile_multilib: "32",
+    // Strip to minimum size
+    strip: {
+        all: true,
+    },
+}
