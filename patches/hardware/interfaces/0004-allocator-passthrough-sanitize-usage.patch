@@ -1,0 +1,56 @@
+From 8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a Mon Sep 17 00:00:00 2001
+From: Dargons10 <jdamr2p@gmail.com>
+Date: Thu, 22 Oct 2026 23:30:00 +0200
+Subject: [PATCH 0004] allocator-passthrough: sanitize usage to avoid legacy gralloc blob exact-match clear path
+
+The Tegra124 gralloc.tegra blob (from 17.1 vendor) checks for exact legacy
+usage values (0x11, 0x100, 0x104, 0x106) to trigger a 2D GPU clear via
+NvGr2DClearImplicit -> NvBlit. On T124 the 2D engine (gr2d) is not available,
+causing a NULL context dereference and SIGSEGV at android_atomic_inc+4.
+
+New AOSP usage flags (e.g., GRALLOC_USAGE_HW_TEXTURE = 0x100) collide with
+these legacy values when truncated to 32-bit for the gralloc0 alloc() call.
+
+Fix: OR a harmless SW_READ_RARELY (0x8) bit into the truncated usage before
+passing to the blob. This changes exact matches:
+  0x100 -> 0x108, 0x104 -> 0x10C, 0x106 -> 0x10E, 0x11 -> 0x19
+avoiding the blob's clear path entirely.
+
+Change-Id: I4a7b2c9d1e8f3a6b5c7d9e0f1a2b3c4d5e6f7a8b
+Signed-off-by: Dargons10 <jdamr2p@gmail.com>
+---
+ hardware/interfaces/graphics/allocator/2.0/utils/passthrough/include/allocator-passthrough/2.0/Gralloc0Hal.h | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/graphics/allocator/2.0/utils/passthrough/include/allocator-passthrough/2.0/Gralloc0Hal.h b/graphics/allocator/2.0/utils/passthrough/include/allocator-passthrough/2.0/Gralloc0Hal.h
+index 6c179be72..f5da4e09c 100644
+--- a/graphics/allocator/2.0/utils/passthrough/include/allocator-passthrough/2.0/Gralloc0Hal.h
++++ b/graphics/allocator/2.0/utils/passthrough/include/allocator-passthrough/2.0/Gralloc0Hal.h
+@@ -130,10 +130,26 @@ class Gralloc0HalImpl : public Hal {
+             return Error::BAD_VALUE;
+         }
+ 
++        // Sanitize usage to avoid legacy gralloc.tegra blob exact-match checks
++        // for 0x11, 0x100, 0x104, 0x106 which trigger NvGr2DClearImplicit ->
++        // NvBlit crash on T124 (gr2d engine unavailable). OR in harmless
++        // GRALLOC_USAGE_SW_READ_RARELY (0x8) to break exact equality.
++        uint32_t usage = static_cast<uint32_t>(info.usage);
++        if ((usage & 0xFF) == 0x00 || (usage & 0xFF) == 0x01 ||
++            (usage & 0xFF) == 0x04 || (usage & 0xFF) == 0x06 ||
++            (usage & 0xFF) == 0x10 || (usage & 0xFF) == 0x11) {
++            usage |= 0x08;  // GRALLOC_USAGE_SW_READ_RARELY
++        }
++        // Also avoid exact 0x100, 0x104, 0x106 matches (legacy HW_VIDEO_ENCODER)
++        if ((usage & 0x1FF) == 0x100 || (usage & 0x1FF) == 0x104 ||
++            (usage & 0x1FF) == 0x106) {
++            usage |= 0x08;
++        }
++
+         const native_handle_t* buffer = nullptr;
+         int stride = 0;
+         int result = mDevice->alloc(mDevice, info.width, info.height, static_cast<int>(info.format),
+-                                    info.usage, &buffer, &stride);
++                                    usage, &buffer, &stride);
+         switch (result) {
+             case 0:
+                 *outBuffer = buffer;
