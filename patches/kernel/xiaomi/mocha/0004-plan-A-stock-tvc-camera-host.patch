@@ -1,3 +1,39 @@
+From 4d03d64aa6d4f34adcc797ff0f37ec2dce5f23b7 Mon Sep 17 00:00:00 2001
+From: Dargons10 <jdamr2p@gmail.com>
+Date: Tue, 27 Oct 2026 22:35:46 +0100
+Subject: [PATCH] ARM: tegra: mocha: switch to the NVIDIA TVC camera model for
+ the stock HAL
+
+Plan A (stock NVIDIA HAL camera.vendor.tegra.so).
+
+Kernel side:
+- tegra12_android_defconfig: drop the stale '# CONFIG_VIDEO_CAMERA is not set'
+  line that silently cancelled the later 'CONFIG_VIDEO_CAMERA=y' (last-wins in
+  kconfig), so the TVC host now actually builds: drivers/media/platform/tegra/
+  camera.o (pcl-generic -> /dev/camera.pcl) plus all of cam_dev/
+  (dev_access, debugfs, virtual, edp, of_camera). Keep the legacy sensor drivers
+  (CONFIG_VIDEO_IMX179/AD5823/OV5693) and disable the competing mocha V4L2
+  pipeline (CONFIG_VIDEO_MOCHA_V4L2, TEGRA_VI_V4L2, TEGRA_CSI, *_V4L2 sensors).
+- tegra124-mocha.dts: re-enable the base vi / isp@54600000 / isp@54680000 nodes
+  that the V4L2 model had turned off, and include the in-tree original e1780
+  camera model 'tegra124-mocha-camera.dtsi'.
+
+Why the in-tree model: of_camera_create_pdata() (cam_dev/of_camera.c:487) needs a
+child node named 'modules' under the nvidia,tegra124-camera device; without it
+pcl-generic probes but returns -ENODEV ('pcl-generic pcl-generic: module node not
+found'), /dev/camera.pcl is never created and the stock HAL enumerates 0 devices.
+tegra124-mocha-camera.dtsi provides camera-pcl + configuration magic + modules
+(module1 rear imx179+ad5823, module2 front ov5693, badge e1780_*) + profiles
+pcl_IMX179/pcl_AD5823/pcl_OV5693 with busnum 2, detect/devid, poweron/poweroff
+sequences and platformdata="ardbeg_*_pdata" (the blobs restored by patch 0001).
+The hand-written tegra124-mocha-camera-tvc.dtsi is removed: it lacked 'modules'.
+---
+ arch/arm/boot/dts/tegra124-mocha.dts          | 12 ++--
+ .../tegra124-mocha-camera-tvc.dtsi            | 70 -------------------
+ arch/arm/configs/tegra12_android_defconfig    | 23 +++---
+ 3 files changed, 20 insertions(+), 85 deletions(-)
+ delete mode 100644 arch/arm/boot/dts/tegra124-platforms/tegra124-mocha-camera-tvc.dtsi
+
 diff --git a/arch/arm/boot/dts/tegra124-mocha.dts b/arch/arm/boot/dts/tegra124-mocha.dts
 index eb9564a18d3..b1c529fd59a 100644
 --- a/arch/arm/boot/dts/tegra124-mocha.dts
@@ -30,6 +66,82 @@ index eb9564a18d3..b1c529fd59a 100644
  
  		/* tegradc.0 */
  		dc@54200000 {
+diff --git a/arch/arm/boot/dts/tegra124-platforms/tegra124-mocha-camera-tvc.dtsi b/arch/arm/boot/dts/tegra124-platforms/tegra124-mocha-camera-tvc.dtsi
+deleted file mode 100644
+index 2f049633eb3..00000000000
+--- a/arch/arm/boot/dts/tegra124-platforms/tegra124-mocha-camera-tvc.dtsi
++++ /dev/null
+@@ -1,70 +0,0 @@
+-/*
+- * Copyright (c) 2026, Dargons10.  All rights reserved.
+- *
+- * This program is free software; you can redistribute it and/or modify it
+- * under the terms and conditions of the GNU General Public License,
+- * version 2, as published by the Free Software Foundation.
+- *
+- * Tegra124 Mocha (MiPad 1st Gen) camera bindings for the LEGACY NVIDIA
+- * TVC/NVC stack (drivers/media/platform/tegra/*.c + camera.pcl).
+- *
+- * Model (matches the 3.10.108 root drivers, Zack8141 TN8 style):
+- *  - sensors are i2c OF nodes probed via of_match (compatible nvidia,*)
+- *  - camera.pcl misc device instantiated by the pcl-generic platform
+- *    device auxdata in board-mocha.c bound to the nvidia,tegra124-camera
+- *    node below; libnvmm creates/manges devices through ioctl on it.
+- *  - VI/CSI/ISP live in the base tegra124.dtsi nvhost nodes (CONFIG_GRHOST).
+- *
+- * Hardware (same wiring as tegra124-mocha-camera-mc.dtsi):
+- *   Rear:  IMX179 @i2c 0x10, reset=PBB3(219), af_pwdn=PBB7(223), MCLK1
+- *   AF:    AD5823 @i2c 0x0c, af-pwdn=PBB7(223)
+- *   Front: OV5693 @i2c 0x36, reset=PCC1(225) (used as pwdn by NVC), MCLK2
+- *   Regulators: LDO4 avdd-cam 2.7V, LDO2 1.8V, LDO6 vdd-cam-af 1.8V,
+- *               LDO7 avdd-cam-af 2.7V (palmas e1736).
+- */
+-
+-#include <dt-bindings/gpio/tegra-gpio.h>
+-
+-/ {
+-	camera {
+-		compatible = "nvidia,tegra124-camera", "simple-bus";
+-		status = "okay";
+-	};
+-
+-	i2c@7000c500 {
+-		status = "okay";
+-		clock-frequency = <400000>;
+-
+-		imx179@10 {
+-			compatible = "nvidia,imx179";
+-			reg = <0x10>;
+-			clocks = <&tegra_car 20>;
+-			clock-names = "default_mclk";
+-			reset-gpios = <&gpio TEGRA_GPIO(BB, 3) GPIO_ACTIVE_HIGH>;
+-			af-gpios = <&gpio TEGRA_GPIO(BB, 7) GPIO_ACTIVE_HIGH>;
+-			vana-supply = <&palmas_ldo4>;
+-			vdig-supply = <&palmas_ldo2>;
+-			vif-supply = <&palmas_ldo6>;
+-			nvidia,ext_reg;
+-		};
+-
+-		ad5823@0c {
+-			compatible = "nvidia,ad5823";
+-			reg = <0x0c>;
+-			af-pwdn-gpios = <&gpio TEGRA_GPIO(BB, 7) GPIO_ACTIVE_HIGH>;
+-			vdd-supply = <&palmas_ldo7>;
+-		};
+-
+-		ov5693@36 {
+-			compatible = "nvidia,ov5693";
+-			reg = <0x36>;
+-			clocks = <&tegra_car 21>;
+-			clock-names = "mclk2";
+-			nvidia,mclk_name = "mclk2";
+-			reset-gpios = <&gpio TEGRA_GPIO(CC, 1) GPIO_ACTIVE_HIGH>;
+-			avdd_ov5693-supply = <&palmas_ldo4>;
+-			dvdd-supply = <&palmas_ldo2>;
+-			dovdd-supply = <&palmas_ldo6>;
+-		};
+-	};
+-};
 diff --git a/arch/arm/configs/tegra12_android_defconfig b/arch/arm/configs/tegra12_android_defconfig
 index 8365e85cff7..04d9545b9f4 100644
 --- a/arch/arm/configs/tegra12_android_defconfig
@@ -85,3 +197,6 @@ index 8365e85cff7..04d9545b9f4 100644
  
  
  # LED
+-- 
+2.47.3
+

@@ -59,27 +59,43 @@ comandos de reversión exactos por repo y por parche, está en:
 <root del árbol>/notes_estado_cambios_20261027.md
 ```
 
-Resumen de estado de los parches de kernel (2026-10-27):
-- `0001-board-ardbeg-sensors-restore-camera-pdata-blobs.patch` → **aplicado en árbol** (sin commitear)
-- `0002-defconfig-disable-cgroup_debug-and-debug_vm.patch` → **NO aplicado en árbol** ⚠️ (sí estaba en
-  el kernel compilado; **reaplicar antes del próximo build**)
+Resumen de estado de los parches de kernel (2026-10-27, tras commitear Plan A):
+- `0001-board-ardbeg-sensors-restore-camera-pdata-blobs.patch` → **commiteado** (`4258d469855`)
+- `0002-defconfig-disable-cgroup_debug-and-debug_vm.patch` → **commiteado dentro de `4d03d64aa6d`**
+  (sus hunks `CGROUP_DEBUG`/`DEBUG_VM` viajaron con el commit del Plan A) ⇒ **no reaplicar**,
+  ya está en el árbol ⚠️
 - `0003-dts-include-mocha-camera-mc-and-disable-legacy-sensors.patch` → **REVERTIDO hoy**
   (ruta stock/TVC activa); reaplicarlo devuelve la ruta V4L2 `mocha-vi`
+- `0004-plan-A-stock-tvc-camera-host.patch` → **commiteado** (`4d03d64aa6d`)
 
 ### 0004-plan-A-stock-tvc-camera-host.patch  (kernel)
 
 Plan A (HAL stock NVIDIA): host de captura TVC en lugar de mocha-vi.
-- `tegra124-mocha.dts`: pasa a incluir `tegra124-mocha-camera-tvc.dtsi` y re-habilita
+- `tegra124-mocha.dts`: pasa a incluir **`tegra124-mocha-camera.dtsi`** (el modelo TVC original
+  de MiPad e1780 que ya está en el árbol del kernel) y re-habilita
   `vi`, `isp@54600000`, `isp@54680000` (estaban disabled para la ruta B).
-- `tegra12_android_defconfig`: elimina la lnea duplicada
+- `tegra12_android_defconfig`: elimina la línea duplicada
   `# CONFIG_VIDEO_CAMERA is not set` (ganaba sobre `CONFIG_VIDEO_CAMERA=y` y TVC nunca se
   compilaba) y apaga `VIDEO_MOCHA_V4L2`, `TEGRA_VI_V4L2`, `TEGRA_CSI`, `*_V4L2` de sensores.
+- Se elimina el `tegra124-mocha-camera-tvc.dtsi` escrito a mano: no tenía nodo `modules`.
 
-**Ya est commiteado en el rama del kernel** (`1cd0a93cf80`); el fichero es el registro
+**Motivo del cambio de DT (medido en vivo):** `of_camera_create_pdata()`
+(`cam_dev/of_camera.c:487`) hace `of_find_node_by_name(of_node, "modules")`; sin ese nodo el
+driver imprime `pcl-generic pcl-generic: module node not found` y devuelve `-ENODEV` ⇒ no se
+crea `/dev/camera.pcl` ⇒ el HAL stock enumera **0 dispositivos**. El `tegra124-mocha-camera.dtsi`
+de NVIDIA sí trae `camera-pcl` + `configuration = <0xAA55AA55>` + `modules` (module1 trasero
+imx179+ad5823, module2 frontal ov5693, `badge_info="e1780_*_camera"`) + `profiles`
+`pcl_IMX179`/`pcl_AD5823`/`pcl_OV5693` (busnum 2, addr 0x10/0xc/0x36, `detect`/`devid`,
+secuencias `poweron`/`poweroff` con GPIO 219/221/222/223/225 y reguladores) y
+`platformdata="ardbeg_*_pdata"`, que son justo los blobs que restaura el parche **0001**.
+
+**Ya está commiteado en la rama del kernel** (`4d03d64aa6d`); el fichero es el registro
 reversible. Para volver a la ruta B (V4L2):
 
 ```bash
-git -C kernel/xiaomi/mocha revert 1cd0a93cf80        # deja el kernel como estaba
-# o, equivalente, reaplicar el 0003:
+git -C kernel/xiaomi/mocha revert 4d03d64aa6d        # deja el kernel como estaba
+# OJO: ese revert también desactiva de nuevo CGROUP_DEBUG/DEBUG_VM (hunks del 0002):
+git -C kernel/xiaomi/mocha apply device/xiaomi/mocha/patches/kernel/xiaomi/mocha/0002-*.patch
+# y, equivalente para la cmara, reaplicar el 0003:
 git -C kernel/xiaomi/mocha apply device/xiaomi/mocha/patches/kernel/xiaomi/mocha/0003-*.patch
 ```
