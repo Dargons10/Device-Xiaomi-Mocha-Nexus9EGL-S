@@ -65,3 +65,21 @@ Resumen de estado de los parches de kernel (2026-10-27):
   el kernel compilado; **reaplicar antes del próximo build**)
 - `0003-dts-include-mocha-camera-mc-and-disable-legacy-sensors.patch` → **REVERTIDO hoy**
   (ruta stock/TVC activa); reaplicarlo devuelve la ruta V4L2 `mocha-vi`
+
+### 0004-plan-A-stock-tvc-camera-host.patch  (kernel)
+
+Plan A (HAL stock NVIDIA): host de captura TVC en lugar de mocha-vi.
+- `tegra124-mocha.dts`: pasa a incluir `tegra124-mocha-camera-tvc.dtsi` y re-habilita
+  `vi`, `isp@54600000`, `isp@54680000` (estaban disabled para la ruta B).
+- `tegra12_android_defconfig`: elimina la lnea duplicada
+  `# CONFIG_VIDEO_CAMERA is not set` (ganaba sobre `CONFIG_VIDEO_CAMERA=y` y TVC nunca se
+  compilaba) y apaga `VIDEO_MOCHA_V4L2`, `TEGRA_VI_V4L2`, `TEGRA_CSI`, `*_V4L2` de sensores.
+
+**Ya est commiteado en el rama del kernel** (`1cd0a93cf80`); el fichero es el registro
+reversible. Para volver a la ruta B (V4L2):
+
+```bash
+git -C kernel/xiaomi/mocha revert 1cd0a93cf80        # deja el kernel como estaba
+# o, equivalente, reaplicar el 0003:
+git -C kernel/xiaomi/mocha apply device/xiaomi/mocha/patches/kernel/xiaomi/mocha/0003-*.patch
+```

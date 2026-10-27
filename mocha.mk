@@ -85,7 +85,8 @@ PRODUCT_PACKAGES += \
     libmocha_sensor_shim \
     libpowerservice_client \
     libshim_camera \
-    libFaceProc
+    libFaceProc \
+    mocha_libcameraservice_stub
 
 # NVIDIA camera blob configuration (the blob reads /etc/nvcamera.conf and
 # /etc/model_frontal.xml = /system/etc at runtime)

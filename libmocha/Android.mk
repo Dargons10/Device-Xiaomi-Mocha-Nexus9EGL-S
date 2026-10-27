@@ -112,3 +112,25 @@ LOCAL_MODULE_TAGS := optional
 LOCAL_MODULE_CLASS := SHARED_LIBRARIES
 include $(BUILD_SHARED_LIBRARY)
 
+# ---------------------------------------------------------------------------
+# Plan A (HAL stock NVIDIA / TVC): stub vendor-visible de libcameraservice.
+# El blob proprietary camera.vendor.tegra.so pide en DT_NEEDED libcameraservice,
+# libgui, libmedia y libbinder, que en A12 son de namespace "default" (system).
+# El HAL se carga en el namespace "vendor" -> dlopen falla y hw_get_module()
+# no prueba otra variante -> 0 dispositivos. readelf muestra que el blob NO usa
+# ningun simbolo de libcameraservice (0 de 345 undefined symbols), asi que un
+# .so vacio en vendor satisface la dependencia sin arrastrar system a vendor.
+# Ver: device/xiaomi/mocha/libmocha/cameraservice_stub.c
+# Revertir: borrar este bloque, cameraservice_stub.c y la entrada de mocha.mk.
+# ---------------------------------------------------------------------------
+include $(CLEAR_VARS)
+LOCAL_SRC_FILES := cameraservice_stub.c
+LOCAL_MODULE := mocha_libcameraservice_stub
+LOCAL_MODULE_STEM := libcameraservice.so
+LOCAL_MODULE_CLASS := SHARED_LIBRARIES
+LOCAL_MODULE_TAGS := optional
+LOCAL_MULTILIB := 32
+LOCAL_PROPRIETARY_MODULE := true
+LOCAL_MODULE_OWNER := xiaomi
+include $(BUILD_SHARED_LIBRARY)
+
