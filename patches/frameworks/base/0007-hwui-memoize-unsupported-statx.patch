@@ -1,0 +1,39 @@
+From: mocha port <local>
+Subject: [PATCH 0007] hwui: memoize the unsupported statx() font-verity probe
+
+getVerity() calls statx() for every font of every process to decide whether the
+font file is dm-verity backed (safe to mmap-share). statx() arrived in kernel
+4.14; the mocha 3.10 kernel returns ENOSYS, giving one ALOGE per font per process
+(108 lines for Roboto-Regular.ttf alone in a normal boot) plus a useless syscall
+each time. Remember the first result; without statx there is no dm-verity either,
+so returning false stays correct.
+---
+diff --git a/libs/hwui/jni/Typeface.cpp b/libs/hwui/jni/Typeface.cpp
+index d86d9ee56f4c..1f0e02d6da69 100644
+--- a/libs/hwui/jni/Typeface.cpp
++++ b/libs/hwui/jni/Typeface.cpp
+@@ -162,11 +162,23 @@ static void Typeface_registerGenericFamily(JNIEnv *env, jobject, jstring familyN
+ #ifdef __ANDROID__
+ 
+ static bool getVerity(const std::string& path) {
++    // statx() llego en el kernel 4.14; el kernel 3.10 de mocha no lo tiene y
++    // devolve ENOSYS para cada fuente de cada proceso (108+ lineas de log en un
++    // arranque normal). Memorizar el resultado elimina el spam y los syscalls
++    // inutiles; sin statx tampoco hay dm-verity, asi que 'false' es correcto.
++    static volatile int statxSupported = -1;
++    if (statxSupported == 0) return false;
+     struct statx out = {};
+     if (statx(AT_FDCWD, path.c_str(), 0 /* flags */, STATX_ALL, &out) != 0) {
+-        ALOGE("statx failed for %s, errno = %d", path.c_str(), errno);
++        if (errno == ENOSYS) {
++            statxSupported = 0;
++        } else {
++            statxSupported = 1;
++            ALOGE("statx failed for %s, errno = %d", path.c_str(), errno);
++        }
+         return false;
+     }
++    statxSupported = 1;
+ 
+     // Validity check.
+     if ((out.stx_attributes_mask & STATX_ATTR_VERITY) == 0) {

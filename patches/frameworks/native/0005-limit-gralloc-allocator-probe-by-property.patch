@@ -1,0 +1,69 @@
+diff --git a/libs/ui/GraphicBufferAllocator.cpp b/libs/ui/GraphicBufferAllocator.cpp
+index 3f958ba68f..5779201b50 100644
+--- a/libs/ui/GraphicBufferAllocator.cpp
++++ b/libs/ui/GraphicBufferAllocator.cpp
+@@ -25,6 +25,7 @@
+ 
+ #include <grallocusage/GrallocUsageConversion.h>
+ 
++#include <android-base/properties.h>
+ #include <android-base/stringprintf.h>
+ #include <log/log.h>
+ #include <utils/Singleton.h>
+@@ -47,16 +48,48 @@ Mutex GraphicBufferAllocator::sLock;
+ KeyedVector<buffer_handle_t,
+     GraphicBufferAllocator::alloc_rec_t> GraphicBufferAllocator::sAllocList;
+ 
++// Version maxima del allocator que este dispositivo expone (por defecto: comportamiento AOSP).
++//
++// mocha solo instala android.hardware.graphics.allocator@2.0-service y su manifest.xml
++// declara 2.0 (device/xiaomi/mocha/manifest.xml:67). La cascada 4 -> 3 -> 2 de este
++// constructor llama IAllocator::getService() para 4.x y 3.x (Gralloc4.cpp:1067),
++// hwservicemanager no las encuentra e intenta arrancarlas como HAL lazy, esperando
++// ~1 s cada una. En el log capturado se ve literalmente:
++//   07:06:23.672 hwservicemanager: getTransport: Cannot find entry
++//       android.hardware.graphics.allocator@4.0::IAllocator/default ...
++//   07:06:24.675 hwservicemanager: ... trying to start it as a lazy HAL   (1,003 s)
++//   07:06:24.678 W Gralloc4: allocator 4.x is not supported
++//   07:06:24.678 ... Cannot find entry ...allocator@3.0::IAllocator/default
++//   07:06:25.680 ... trying to start it as a lazy HAL                     (1,002 s)
++// Es ~2 s perdidos por cada proceso que construye GraphicBufferAllocator (init de
++// GPU/HWUI/SurfaceFlinger/clientes graficos). Con ro.vendor.graphics.allocator.max_version=2
++// la cascada se recorta al version realmente instalado.
++// OJO: debe coincidir con las versiones instaladas de mapper-*-impl, porque este
++// constructor castea el mapper cargado al mapper de la version del allocator;
++// mocha instala unicamente android.hardware.graphics.mapper@2.0-impl (mocha.mk:155),
++// y de hecho hoy el allocator ya termina en 2.0 (el log muestra 4.x y 3.x fallando).
++static int maxAllocatorVersion() {
++    static const int maxVersion =
++            android::base::GetIntProperty("ro.vendor.graphics.allocator.max_version", 4);
++    return maxVersion;
++}
++
+ GraphicBufferAllocator::GraphicBufferAllocator() : mMapper(GraphicBufferMapper::getInstance()) {
+-    mAllocator = std::make_unique<const Gralloc4Allocator>(
+-            reinterpret_cast<const Gralloc4Mapper&>(mMapper.getGrallocMapper()));
+-    if (mAllocator->isLoaded()) {
+-        return;
++    const int maxVersion = maxAllocatorVersion();
++
++    if (maxVersion >= 4) {
++        mAllocator = std::make_unique<const Gralloc4Allocator>(
++                reinterpret_cast<const Gralloc4Mapper&>(mMapper.getGrallocMapper()));
++        if (mAllocator->isLoaded()) {
++            return;
++        }
+     }
+-    mAllocator = std::make_unique<const Gralloc3Allocator>(
+-            reinterpret_cast<const Gralloc3Mapper&>(mMapper.getGrallocMapper()));
+-    if (mAllocator->isLoaded()) {
+-        return;
++    if (maxVersion >= 3) {
++        mAllocator = std::make_unique<const Gralloc3Allocator>(
++                reinterpret_cast<const Gralloc3Mapper&>(mMapper.getGrallocMapper()));
++        if (mAllocator->isLoaded()) {
++            return;
++        }
+     }
+     mAllocator = std::make_unique<const Gralloc2Allocator>(
+             reinterpret_cast<const Gralloc2Mapper&>(mMapper.getGrallocMapper()));

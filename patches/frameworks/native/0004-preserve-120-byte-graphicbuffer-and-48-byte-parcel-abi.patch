@@ -1,0 +1,677 @@
+diff --git a/libs/binder/Parcel.cpp b/libs/binder/Parcel.cpp
+index 9c5466635e..5a86819837 100644
+--- a/libs/binder/Parcel.cpp
++++ b/libs/binder/Parcel.cpp
+@@ -36,6 +36,7 @@
+ #include <binder/IPCThreadState.h>
+ #include <binder/Parcel.h>
+ #include <binder/ProcessState.h>
++#include <binder/RpcSession.h>
+ #include <binder/Stability.h>
+ #include <binder/Status.h>
+ #include <binder/TextOutput.h>
+@@ -77,11 +78,27 @@ static size_t pad_size(size_t s) {
+ 
+ namespace android {
+ 
++// mocha: newer Parcel bookkeeping lives here so that the object itself keeps the
++// 48-byte layout that the stock 32-bit NVIDIA/Tegra clients assume.
++struct Parcel::ParcelState {
++    size_t mOpenAshmemSize = 0;
++    mutable sp<RpcSession> mSession;
++    size_t mWorkSourceRequestHeaderPosition = 0;
++    bool mRequestHeaderPresent = false;
++    mutable bool mDeallocZero = false;
++};
++
+ // many things compile this into prebuilts on the stack
+ #ifdef __LP64__
+-static_assert(sizeof(Parcel) == 120);
++// 64-bit/host builds never ship the stock-blob compatibility layout; only a
++// sanity floor is enforced there (host tools such as linux_glibc libbinder do
++// not have a fixed ABI requirement).
++static_assert(sizeof(Parcel) >= 48);
+ #else
+-static_assert(sizeof(Parcel) == 60);
++// Stock mocha blobs (libnvcpl.so, libnvremoteprotocol.so, libnvaudioservice.so, ...)
++// construct android::Parcel inside stack frames sized for exactly 48 bytes; a 60-byte
++// Parcel overflows them by 12 bytes and overwrites their saved r4/r5/r6 slots.
++static_assert(sizeof(Parcel) == 48, "stock NVIDIA/Tegra clients allocate 48-byte Parcels");
+ #endif
+ 
+ static std::atomic<size_t> gParcelGlobalAllocCount;
+@@ -202,7 +219,7 @@ status_t Parcel::flattenBinder(const sp<IBinder>& binder)
+             status_t status = writeInt32(1); // non-null
+             if (status != OK) return status;
+             RpcAddress address = RpcAddress::zero();
+-            status = mSession->state()->onBinderLeaving(mSession, binder, &address);
++            status = mState->mSession->state()->onBinderLeaving(mState->mSession, binder, &address);
+             if (status != OK) return status;
+             status = address.writeToParcel(this);
+             if (status != OK) return status;
+@@ -273,7 +290,7 @@ status_t Parcel::flattenBinder(const sp<IBinder>& binder)
+ status_t Parcel::unflattenBinder(sp<IBinder>* out) const
+ {
+     if (isForRpc()) {
+-        LOG_ALWAYS_FATAL_IF(mSession == nullptr, "RpcSession required to read from remote parcel");
++        LOG_ALWAYS_FATAL_IF(mState->mSession == nullptr, "RpcSession required to read from remote parcel");
+ 
+         int32_t isNull;
+         status_t status = readInt32(&isNull);
+@@ -285,7 +302,7 @@ status_t Parcel::unflattenBinder(sp<IBinder>* out) const
+             auto addr = RpcAddress::zero();
+             status_t status = addr.readFromParcel(*this);
+             if (status != OK) return status;
+-            binder = mSession->state()->onBinderEntering(mSession, addr);
++            binder = mState->mSession->state()->onBinderEntering(mState->mSession, addr);
+         }
+ 
+         return finishUnflattenBinder(binder, out);
+@@ -312,7 +329,7 @@ status_t Parcel::unflattenBinder(sp<IBinder>* out) const
+ 
+ // ---------------------------------------------------------------------------
+ 
+-Parcel::Parcel()
++Parcel::Parcel() : mState(new ParcelState)
+ {
+     LOG_ALLOC("Parcel %p: constructing", this);
+     initState();
+@@ -321,6 +338,8 @@ Parcel::Parcel()
+ Parcel::~Parcel()
+ {
+     freeDataNoInit();
++    delete mState;
++    mState = nullptr;
+     LOG_ALLOC("Parcel %p: destroyed", this);
+ }
+ 
+@@ -504,7 +523,7 @@ status_t Parcel::appendFrom(const Parcel *parcel, size_t offset, size_t len)
+ 
+             flat_binder_object* flat
+                 = reinterpret_cast<flat_binder_object*>(mData + off);
+-            acquire_object(proc, *flat, this, &mOpenAshmemSize);
++            acquire_object(proc, *flat, this, &mState->mOpenAshmemSize);
+ 
+             if (flat->hdr.type == BINDER_TYPE_FD) {
+                 // If this is a file descriptor, we need to dup it so the
+@@ -560,7 +579,7 @@ bool Parcel::hasFileDescriptors() const
+ 
+ void Parcel::markSensitive() const
+ {
+-    mDeallocZero = true;
++    mState->mDeallocZero = true;
+ }
+ 
+ void Parcel::markForBinder(const sp<IBinder>& binder) {
+@@ -576,19 +595,19 @@ void Parcel::markForRpc(const sp<RpcSession>& session) {
+                         "format must be set before data is written OR on IPC data");
+ 
+     LOG_ALWAYS_FATAL_IF(session == nullptr, "markForRpc requires session");
+-    mSession = session;
++    mState->mSession = session;
+ }
+ 
+ bool Parcel::isForRpc() const {
+-    return mSession != nullptr;
++    return mState->mSession != nullptr;
+ }
+ 
+ void Parcel::updateWorkSourceRequestHeaderPosition() const {
+     // Only update the request headers once. We only want to point
+     // to the first headers read/written.
+-    if (!mRequestHeaderPresent) {
+-        mWorkSourceRequestHeaderPosition = dataPosition();
+-        mRequestHeaderPresent = true;
++    if (!mState->mRequestHeaderPresent) {
++        mState->mWorkSourceRequestHeaderPosition = dataPosition();
++        mState->mRequestHeaderPresent = true;
+     }
+ }
+ 
+@@ -620,12 +639,12 @@ status_t Parcel::writeInterfaceToken(const char16_t* str, size_t len) {
+ 
+ bool Parcel::replaceCallingWorkSourceUid(uid_t uid)
+ {
+-    if (!mRequestHeaderPresent) {
++    if (!mState->mRequestHeaderPresent) {
+         return false;
+     }
+ 
+     const size_t initialPosition = dataPosition();
+-    setDataPosition(mWorkSourceRequestHeaderPosition);
++    setDataPosition(mState->mWorkSourceRequestHeaderPosition);
+     status_t err = writeInt32(uid);
+     setDataPosition(initialPosition);
+     return err == NO_ERROR;
+@@ -633,12 +652,12 @@ bool Parcel::replaceCallingWorkSourceUid(uid_t uid)
+ 
+ uid_t Parcel::readCallingWorkSourceUid() const
+ {
+-    if (!mRequestHeaderPresent) {
++    if (!mState->mRequestHeaderPresent) {
+         return IPCThreadState::kUnsetWorkSource;
+     }
+ 
+     const size_t initialPosition = dataPosition();
+-    setDataPosition(mWorkSourceRequestHeaderPosition);
++    setDataPosition(mState->mWorkSourceRequestHeaderPosition);
+     uid_t uid = readInt32();
+     setDataPosition(initialPosition);
+     return uid;
+@@ -1335,7 +1354,7 @@ restart_write:
+         // Need to write meta-data?
+         if (nullMetaData || val.binder != 0) {
+             mObjects[mObjectsSize] = mDataPos;
+-            acquire_object(ProcessState::self(), val, this, &mOpenAshmemSize);
++            acquire_object(ProcessState::self(), val, this, &mState->mOpenAshmemSize);
+             mObjectsSize++;
+         }
+ 
+@@ -2212,7 +2231,7 @@ void Parcel::releaseObjects()
+         i--;
+         const flat_binder_object* flat
+             = reinterpret_cast<flat_binder_object*>(data+objects[i]);
+-        release_object(proc, *flat, this, &mOpenAshmemSize);
++        release_object(proc, *flat, this, &mState->mOpenAshmemSize);
+     }
+ }
+ 
+@@ -2229,7 +2248,7 @@ void Parcel::acquireObjects()
+         i--;
+         const flat_binder_object* flat
+             = reinterpret_cast<flat_binder_object*>(data+objects[i]);
+-        acquire_object(proc, *flat, this, &mOpenAshmemSize);
++        acquire_object(proc, *flat, this, &mState->mOpenAshmemSize);
+     }
+ }
+ 
+@@ -2253,7 +2272,7 @@ void Parcel::freeDataNoInit()
+             LOG_ALLOC("Parcel %p: freeing with %zu capacity", this, mDataCapacity);
+             gParcelGlobalAllocSize -= mDataCapacity;
+             gParcelGlobalAllocCount--;
+-            if (mDeallocZero) {
++            if (mState->mDeallocZero) {
+                 zeroMemory(mData, mDataSize);
+             }
+             free(mData);
+@@ -2314,7 +2333,7 @@ status_t Parcel::restartWrite(size_t desired)
+         return continueWrite(desired);
+     }
+ 
+-    uint8_t* data = reallocZeroFree(mData, mDataCapacity, desired, mDeallocZero);
++    uint8_t* data = reallocZeroFree(mData, mDataCapacity, desired, mState->mDeallocZero);
+     if (!data && desired > mDataCapacity) {
+         mError = NO_MEMORY;
+         return NO_MEMORY;
+@@ -2454,7 +2473,7 @@ status_t Parcel::continueWrite(size_t desired)
+                     // will need to rescan because we may have lopped off the only FDs
+                     mFdsKnown = false;
+                 }
+-                release_object(proc, *flat, this, &mOpenAshmemSize);
++                release_object(proc, *flat, this, &mState->mOpenAshmemSize);
+             }
+ 
+             if (objectsSize == 0) {
+@@ -2476,7 +2495,7 @@ status_t Parcel::continueWrite(size_t desired)
+ 
+         // We own the data, so we can just do a realloc().
+         if (desired > mDataCapacity) {
+-            uint8_t* data = reallocZeroFree(mData, mDataCapacity, desired, mDeallocZero);
++            uint8_t* data = reallocZeroFree(mData, mDataCapacity, desired, mState->mDeallocZero);
+             if (data) {
+                 LOG_ALLOC("Parcel %p: continue from %zu to %zu capacity", this, mDataCapacity,
+                         desired);
+@@ -2536,7 +2555,7 @@ void Parcel::initState()
+     mDataPos = 0;
+     ALOGV("initState Setting data size of %p to %zu", this, mDataSize);
+     ALOGV("initState Setting data pos of %p to %zu", this, mDataPos);
+-    mSession = nullptr;
++    mState->mSession = nullptr;
+     mObjects = nullptr;
+     mObjectsSize = 0;
+     mObjectsCapacity = 0;
+@@ -2545,11 +2564,11 @@ void Parcel::initState()
+     mHasFds = false;
+     mFdsKnown = true;
+     mAllowFds = true;
+-    mDeallocZero = false;
++    mState->mDeallocZero = false;
+     mOwner = nullptr;
+-    mOpenAshmemSize = 0;
+-    mWorkSourceRequestHeaderPosition = 0;
+-    mRequestHeaderPresent = false;
++    mState->mOpenAshmemSize = 0;
++    mState->mWorkSourceRequestHeaderPosition = 0;
++    mState->mRequestHeaderPresent = false;
+ 
+     // racing multiple init leads only to multiple identical write
+     if (gMaxFds == 0) {
+@@ -2584,12 +2603,12 @@ size_t Parcel::getBlobAshmemSize() const
+     // This used to return the size of all blobs that were written to ashmem, now we're returning
+     // the ashmem currently referenced by this Parcel, which should be equivalent.
+     // TODO: Remove method once ABI can be changed.
+-    return mOpenAshmemSize;
++    return mState->mOpenAshmemSize;
+ }
+ 
+ size_t Parcel::getOpenAshmemSize() const
+ {
+-    return mOpenAshmemSize;
++    return mState->mOpenAshmemSize;
+ }
+ 
+ // --- Parcel::Blob ---
+diff --git a/libs/binder/include/binder/IInterface.h b/libs/binder/include/binder/IInterface.h
+index ff90b30380..82786c4abd 100644
+--- a/libs/binder/include/binder/IInterface.h
++++ b/libs/binder/include/binder/IInterface.h
+@@ -297,6 +297,15 @@ constexpr const char* const kManualInterfaces[] = {
+ 
+ constexpr const char* const kDownstreamManualInterfaces[] = {
+   // Add downstream interfaces here.
++  "android.hardware.ICamera",
++  "android.hardware.ICameraClient",
++  "android.hardware.camera2.ICameraDeviceCallbacks",
++  "android.hardware.camera2.ICameraDeviceUser",
++  "android.hardware.ICameraRecordingProxy",
++  "android.hardware.ICameraRecordingProxyListener",
++  "android.hardware.ICameraService",
++  "android.hardware.ICameraServiceListener",
++  "android.hardware.ICameraServiceProxy",
+   nullptr,
+ };
+ 
+diff --git a/libs/binder/include/binder/Parcel.h b/libs/binder/include/binder/Parcel.h
+index ef8014367e..2f5faa8287 100644
+--- a/libs/binder/include/binder/Parcel.h
++++ b/libs/binder/include/binder/Parcel.h
+@@ -1125,21 +1125,23 @@ private:
+     mutable size_t      mNextObjectHint;
+     mutable bool        mObjectsSorted;
+ 
+-    mutable bool        mRequestHeaderPresent;
+-
+-    mutable size_t      mWorkSourceRequestHeaderPosition;
+-
+     mutable bool        mFdsKnown;
+     mutable bool        mHasFds;
+     bool                mAllowFds;
+ 
+-    // if this parcelable is involved in a secure transaction, force the
+-    // data to be overridden with zero when deallocated
+-    mutable bool        mDeallocZero;
+-
+     release_func        mOwner;
+ 
+-    sp<RpcSession> mSession;
++    // mocha: stock 32-bit NVIDIA/Tegra clients (libnvcpl, libnvremoteprotocol,
++    // libnvaudioservice, libnvcapaudioservice, ...) reserve exactly 48 bytes when
++    // they allocate an android::Parcel on the stack. A larger Parcel makes their
++    // Parcel constructor write past the end of their own stack frame and destroy
++    // the saved callee-saved registers (r4/r5/r6) of *their* callers, which here
++    // are libEGL_tegra_impl.so and hwcomposer.tegra.so - that is the source of
++    // the SIGSEGV null dereferences at libEGL_tegra_impl+0x11d06 / +0x11dc2.
++    // Newer bookkeeping therefore lives in heap state so that sizeof(Parcel)
++    // stays 48 bytes on ARM32. See patches/frameworks/native/0004-*.patch.
++    struct ParcelState;
++    ParcelState*        mState;
+ 
+     class Blob {
+     public:
+@@ -1224,9 +1226,6 @@ public:
+         inline void* data() { return mData; }
+     };
+ 
+-private:
+-    size_t mOpenAshmemSize;
+-
+ public:
+     // TODO: Remove once ABI can be changed.
+     size_t getBlobAshmemSize() const;
+diff --git a/libs/ui/GraphicBuffer.cpp b/libs/ui/GraphicBuffer.cpp
+index 3732fee7f2..5c2c4d47e2 100644
+--- a/libs/ui/GraphicBuffer.cpp
++++ b/libs/ui/GraphicBuffer.cpp
+@@ -33,6 +33,14 @@ namespace android {
+ // Buffer and implementation of ANativeWindowBuffer
+ // ===========================================================================
+ 
++// ABI guard for the stock 32-bit Tegra blobs (arm32 only; host/64-bit builds
++// have no fixed GraphicBuffer requirement).
++#if defined(__arm__) && !defined(__LP64__)
++static_assert(sizeof(GraphicBuffer) == 120,
++        "stock 32-bit Tegra blobs allocate 120-byte GraphicBuffers");
++static_assert(sizeof(ANativeWindowBuffer) == 96, "ANativeWindowBuffer ABI prefix");
++#endif
++
+ static uint64_t getUniqueId() {
+     static volatile int32_t nextId = 0;
+     uint64_t id = static_cast<uint64_t>(getpid()) << 32;
+@@ -62,8 +70,9 @@ AHardwareBuffer const* GraphicBuffer::toAHardwareBuffer() const {
+ 
+ GraphicBuffer::GraphicBuffer()
+     : BASE(), mOwner(ownData), mBufferMapper(GraphicBufferMapper::get()),
+-      mInitCheck(NO_ERROR), mId(getUniqueId()), mGenerationNumber(0)
++      mBufferState(new BufferState(getUniqueId()))
+ {
++    mBufferState->initCheck = NO_ERROR;
+     width  =
+     height =
+     stride =
+@@ -84,7 +93,7 @@ GraphicBuffer::GraphicBuffer(uint32_t inWidth, uint32_t inHeight,
+ GraphicBuffer::GraphicBuffer(uint32_t inWidth, uint32_t inHeight, PixelFormat inFormat,
+                              uint32_t inLayerCount, uint64_t inUsage, std::string requestorName)
+       : GraphicBuffer() {
+-    mInitCheck = initWithSize(inWidth, inHeight, inFormat, inLayerCount, inUsage,
++    mBufferState->initCheck = initWithSize(inWidth, inHeight, inFormat, inLayerCount, inUsage,
+                               std::move(requestorName));
+ }
+ 
+@@ -102,19 +111,60 @@ GraphicBuffer::GraphicBuffer(const native_handle_t* inHandle, HandleWrapMethod m
+                              uint32_t inWidth, uint32_t inHeight, PixelFormat inFormat,
+                              uint32_t inLayerCount, uint64_t inUsage, uint32_t inStride)
+       : GraphicBuffer() {
+-    mInitCheck = initWithHandle(inHandle, method, inWidth, inHeight, inFormat, inLayerCount,
++    mBufferState->initCheck = initWithHandle(inHandle, method, inWidth, inHeight, inFormat, inLayerCount,
+                                 inUsage, inStride);
+ }
+ 
++// ---------------------------------------------------------------------------
++// Pre-layer-count constructors imported by the stock 32-bit Tegra blobs.
++// They forward the arguments the blobs actually pass; nothing is aliased.
++// ---------------------------------------------------------------------------
++
++GraphicBuffer::GraphicBuffer(uint32_t inWidth, uint32_t inHeight,
++        PixelFormat inFormat, uint32_t inUsage, uint32_t inStride,
++        native_handle_t* inHandle, bool keepOwnership)
++    : GraphicBuffer(inWidth, inHeight, inFormat, 1, static_cast<uint64_t>(inUsage),
++            inStride, inHandle, keepOwnership)
++{
++}
++
++GraphicBuffer::GraphicBuffer(ANativeWindowBuffer* buffer, bool keepOwnership)
++    : GraphicBuffer(buffer ? buffer->handle : nullptr,
++            keepOwnership ? TAKE_HANDLE : WRAP_HANDLE,
++            buffer ? static_cast<uint32_t>(buffer->width) : 0,
++            buffer ? static_cast<uint32_t>(buffer->height) : 0,
++            buffer ? buffer->format : static_cast<PixelFormat>(0),
++            buffer && buffer->layerCount ? static_cast<uint32_t>(buffer->layerCount) : 1,
++            buffer ? buffer->usage : 0,
++            buffer ? static_cast<uint32_t>(buffer->stride) : 0)
++{
++    if (keepOwnership && buffer != nullptr) {
++        // The wrapped native buffer must stay alive until this GraphicBuffer
++        // is released: stock callers keep no other strong reference.
++        mBufferState->wrappedBuffer = sp<ANativeWindowBuffer>(buffer);
++    }
++}
++
++GraphicBuffer::GraphicBuffer(uint32_t inWidth, uint32_t inHeight,
++        PixelFormat inFormat, uint32_t inUsage)
++    : GraphicBuffer(inWidth, inHeight, inFormat, 1, static_cast<uint64_t>(inUsage),
++            std::string("<Unknown>"))
++{
++}
++
+ GraphicBuffer::~GraphicBuffer()
+ {
+     ATRACE_CALL();
+     if (handle) {
+         free_handle();
+     }
+-    for (auto& [callback, context] : mDeathCallbacks) {
+-        callback(context, mId);
++    for (auto& [callback, context] : mBufferState->deathCallbacks) {
++        if (callback) {
++            callback(context, mBufferState->id);
++        }
+     }
++    delete mBufferState;
++    mBufferState = nullptr;
+ }
+ 
+ void GraphicBuffer::free_handle()
+@@ -129,7 +179,7 @@ void GraphicBuffer::free_handle()
+ }
+ 
+ status_t GraphicBuffer::initCheck() const {
+-    return static_cast<status_t>(mInitCheck);
++    return static_cast<status_t>(mBufferState->initCheck);
+ }
+ 
+ void GraphicBuffer::dumpAllocationsToSystemLog()
+@@ -184,10 +234,11 @@ status_t GraphicBuffer::initWithSize(uint32_t inWidth, uint32_t inHeight,
+     GraphicBufferAllocator& allocator = GraphicBufferAllocator::get();
+     uint32_t outStride = 0;
+     status_t err = allocator.allocate(inWidth, inHeight, inFormat, inLayerCount,
+-            inUsage, &handle, &outStride, mId,
++            inUsage, &handle, &outStride, mBufferState->id,
+             std::move(requestorName));
+     if (err == NO_ERROR) {
+-        mBufferMapper.getTransportSize(handle, &mTransportNumFds, &mTransportNumInts);
++        mBufferMapper.getTransportSize(handle, &mBufferState->transportNumFds,
++                &mBufferState->transportNumInts);
+ 
+         width = static_cast<int>(inWidth);
+         height = static_cast<int>(inHeight);
+@@ -230,7 +281,8 @@ status_t GraphicBuffer::initWithHandle(const native_handle_t* inHandle, HandleWr
+         }
+ 
+         inHandle = importedHandle;
+-        mBufferMapper.getTransportSize(inHandle, &mTransportNumFds, &mTransportNumInts);
++        mBufferMapper.getTransportSize(inHandle, &mBufferState->transportNumFds,
++                &mBufferState->transportNumInts);
+     }
+ 
+     ANativeWindowBuffer::handle = inHandle;
+@@ -354,11 +406,11 @@ status_t GraphicBuffer::isSupported(uint32_t inWidth, uint32_t inHeight, PixelFo
+ }
+ 
+ size_t GraphicBuffer::getFlattenedSize() const {
+-    return static_cast<size_t>(13 + (handle ? mTransportNumInts : 0)) * sizeof(int);
++    return static_cast<size_t>(13 + (handle ? mBufferState->transportNumInts : 0)) * sizeof(int);
+ }
+ 
+ size_t GraphicBuffer::getFdCount() const {
+-    return static_cast<size_t>(handle ? mTransportNumFds : 0);
++    return static_cast<size_t>(handle ? mBufferState->transportNumFds : 0);
+ }
+ 
+ status_t GraphicBuffer::flatten(void*& buffer, size_t& size, int*& fds, size_t& count) const {
+@@ -376,26 +428,26 @@ status_t GraphicBuffer::flatten(void*& buffer, size_t& size, int*& fds, size_t&
+     buf[4] = format;
+     buf[5] = static_cast<int32_t>(layerCount);
+     buf[6] = int(usage); // low 32-bits
+-    buf[7] = static_cast<int32_t>(mId >> 32);
+-    buf[8] = static_cast<int32_t>(mId & 0xFFFFFFFFull);
+-    buf[9] = static_cast<int32_t>(mGenerationNumber);
++    buf[7] = static_cast<int32_t>(mBufferState->id >> 32);
++    buf[8] = static_cast<int32_t>(mBufferState->id & 0xFFFFFFFFull);
++    buf[9] = static_cast<int32_t>(mBufferState->generationNumber);
+     buf[10] = 0;
+     buf[11] = 0;
+     buf[12] = int(usage >> 32); // high 32-bits
+ 
+     if (handle) {
+-        buf[10] = int32_t(mTransportNumFds);
+-        buf[11] = int32_t(mTransportNumInts);
+-        memcpy(fds, handle->data, static_cast<size_t>(mTransportNumFds) * sizeof(int));
++        buf[10] = int32_t(mBufferState->transportNumFds);
++        buf[11] = int32_t(mBufferState->transportNumInts);
++        memcpy(fds, handle->data, static_cast<size_t>(mBufferState->transportNumFds) * sizeof(int));
+         memcpy(buf + 13, handle->data + handle->numFds,
+-               static_cast<size_t>(mTransportNumInts) * sizeof(int));
++               static_cast<size_t>(mBufferState->transportNumInts) * sizeof(int));
+     }
+ 
+     buffer = static_cast<void*>(static_cast<uint8_t*>(buffer) + sizeNeeded);
+     size -= sizeNeeded;
+     if (handle) {
+-        fds += mTransportNumFds;
+-        count -= static_cast<size_t>(mTransportNumFds);
++        fds += mBufferState->transportNumFds;
++        count -= static_cast<size_t>(mBufferState->transportNumFds);
+     }
+     return NO_ERROR;
+ }
+@@ -487,10 +539,10 @@ status_t GraphicBuffer::unflatten(void const*& buffer, size_t& size, int const*&
+         handle = nullptr;
+     }
+ 
+-    mId = static_cast<uint64_t>(buf[7]) << 32;
+-    mId |= static_cast<uint32_t>(buf[8]);
++    mBufferState->id = static_cast<uint64_t>(buf[7]) << 32;
++    mBufferState->id |= static_cast<uint32_t>(buf[8]);
+ 
+-    mGenerationNumber = static_cast<uint32_t>(buf[9]);
++    mBufferState->generationNumber = static_cast<uint32_t>(buf[9]);
+ 
+     mOwner = ownHandle;
+ 
+@@ -510,7 +562,8 @@ status_t GraphicBuffer::unflatten(void const*& buffer, size_t& size, int const*&
+         native_handle_close(handle);
+         native_handle_delete(const_cast<native_handle_t*>(handle));
+         handle = importedHandle;
+-        mBufferMapper.getTransportSize(handle, &mTransportNumFds, &mTransportNumInts);
++        mBufferMapper.getTransportSize(handle, &mBufferState->transportNumFds,
++                &mBufferState->transportNumInts);
+     }
+ 
+     buffer = static_cast<void const*>(static_cast<uint8_t const*>(buffer) + sizeNeeded);
+@@ -521,7 +574,7 @@ status_t GraphicBuffer::unflatten(void const*& buffer, size_t& size, int const*&
+ }
+ 
+ void GraphicBuffer::addDeathCallback(GraphicBufferDeathCallback deathCallback, void* context) {
+-    mDeathCallbacks.emplace_back(deathCallback, context);
++    mBufferState->deathCallbacks.emplace_back(deathCallback, context);
+ }
+ 
+ // ---------------------------------------------------------------------------
+diff --git a/libs/ui/include/ui/GraphicBuffer.h b/libs/ui/include/ui/GraphicBuffer.h
+index 57be686592..38d8a3cfae 100644
+--- a/libs/ui/include/ui/GraphicBuffer.h
++++ b/libs/ui/include/ui/GraphicBuffer.h
+@@ -140,8 +140,26 @@ public:
+     GraphicBuffer(uint32_t inWidth, uint32_t inHeight, PixelFormat inFormat,
+             uint32_t inLayerCount, uint32_t inUsage, uint32_t inStride,
+             native_handle_t* inHandle, bool keepOwnership);
++
++    // Stock 32-bit Tegra blobs were built against the pre-layer-count ABI:
++    //   hwcomposer.tegra.so, libnvcap_video.so -> GraphicBuffer(j,j,i,j,j,P,b)
++    //   libnvomxadaptor.so                     -> GraphicBuffer(ANativeWindowBuffer*, bool)
++    //   libnvwinsys.so                         -> GraphicBuffer(j,j,i,j)
++    // Aliasing those mangled names onto the modern overloads shifts every
++    // argument (usage lands in layerCount, stride in usage, handle in stride),
++    // so they are restored as real overloads forwarding the values the blobs
++    // actually pass. No proprietary binary is modified.
++    GraphicBuffer(uint32_t inWidth, uint32_t inHeight, PixelFormat inFormat,
++            uint32_t inUsage, uint32_t inStride,
++            native_handle_t* inHandle, bool keepOwnership);
++    GraphicBuffer(ANativeWindowBuffer* buffer, bool keepOwnership);
+     GraphicBuffer(uint32_t inWidth, uint32_t inHeight, PixelFormat inFormat,
+-            uint32_t inUsage, std::string requestorName = "<Unknown>");
++            uint32_t inUsage);
++    // The 32-bit-usage string overload intentionally has no default
++    // requestorName so four-argument construction resolves uniquely to the
++    // stock ABI overload above.
++    GraphicBuffer(uint32_t inWidth, uint32_t inHeight, PixelFormat inFormat,
++            uint32_t inUsage, std::string requestorName);
+ 
+     // return status
+     status_t initCheck() const;
+@@ -153,11 +171,11 @@ public:
+     PixelFormat getPixelFormat() const  { return format; }
+     uint32_t getLayerCount() const      { return static_cast<uint32_t>(layerCount); }
+     Rect getBounds() const              { return Rect(width, height); }
+-    uint64_t getId() const              { return mId; }
++    uint64_t getId() const              { return mBufferState->id; }
+ 
+-    uint32_t getGenerationNumber() const { return mGenerationNumber; }
++    uint32_t getGenerationNumber() const { return mBufferState->generationNumber; }
+     void setGenerationNumber(uint32_t generation) {
+-        mGenerationNumber = generation;
++        mBufferState->generationNumber = generation;
+     }
+ 
+     // This function is privileged.  It requires access to the allocator
+@@ -230,6 +248,9 @@ private:
+     inline GraphicBufferMapper& getBufferMapper() {
+         return mBufferMapper;
+     }
++    // Kept at its stock offset (104 on arm32) next to the mapper reference
++    // (108): the stock blobs were compiled against a header whose inline
++    // getBufferMapper() read that exact slot.
+     uint8_t mOwner;
+ 
+ private:
+@@ -252,35 +273,43 @@ private:
+     void free_handle();
+ 
+     GraphicBufferMapper& mBufferMapper;
+-    ssize_t mInitCheck;
+-
+-    // numbers of fds/ints in native_handle_t to flatten
+-    uint32_t mTransportNumFds;
+-    uint32_t mTransportNumInts;
+-
+-    uint64_t mId;
+ 
+-    // Unused, but removing this may break GSI.
+-    int32_t mBufferId = -1;
+-
+-    // Stores the generation number of this buffer. If this number does not
+-    // match the BufferQueue's internal generation number (set through
+-    // IGBP::setGenerationNumber), attempts to attach the buffer will fail.
+-    uint32_t mGenerationNumber;
+-
+-    // Send a callback when a GraphicBuffer dies.
++    // Stock 32-bit Tegra blobs allocate exactly 120 bytes for a GraphicBuffer
++    // (hwcomposer.tegra.so reserves 120 bytes at +0x100da, then calls the
++    // imported constructor). Android 12's stock layout is 160 bytes on arm32,
++    // so those inline allocations are overflowed by 40 bytes of private state,
++    // corrupting the caller's objects and its callee-saved registers.
++    //
++    // arm32 layout produced here:
++    //   0..95   ANativeWindowBuffer (unchanged)
++    //   96..103 RefBase + FlattenableSelf (unchanged)
++    //   104     mOwner            (stock offset)
++    //   108     mBufferMapper&    (stock offset)
++    //   112     mBufferState      (new, out-of-line bookkeeping)
++    //   116..119 padding -> sizeof == 120, exactly what the blobs allocate
+     //
+-    // This is used for BufferStateLayer caching. GraphicBuffers are refcounted per process. When
+-    // A GraphicBuffer doesn't have any more sp<> in a process, it is destroyed. This causes
+-    // problems when trying to implicitcly cache across process boundaries. Ideally, both sides
+-    // of the cache would hold onto wp<> references. When an app dropped its sp<>, the GraphicBuffer
+-    // would be destroyed. Unfortunately, when SurfaceFlinger has only a wp<> reference to the
+-    // GraphicBuffer, it immediately goes out of scope in the SurfaceFlinger process. SurfaceFlinger
+-    // must hold onto a sp<> to the buffer. When the GraphicBuffer goes out of scope in the app's
+-    // process, the client side cache will get this callback. It erases the buffer from its cache
+-    // and informs SurfaceFlinger that it should drop its strong pointer reference to the buffer.
+-    std::vector<std::pair<GraphicBufferDeathCallback, void* /*mDeathCallbackContext*/>>
+-            mDeathCallbacks;
++    // The flattened Binder form ('GB01', words 0..12) is unchanged.
++    struct BufferState {
++        explicit BufferState(uint64_t bufferId) : id(bufferId) {}
++        ~BufferState() = default;
++
++        ssize_t initCheck = NO_ERROR;
++        uint64_t id = 0;
++        uint32_t generationNumber = 0;
++        uint32_t transportNumFds = 0;
++        uint32_t transportNumInts = 0;
++        // Unused, but removing this may break GSI.
++        int32_t bufferId = -1;
++        // Keeps the wrapped buffer alive for the stock
++        // GraphicBuffer(ANativeWindowBuffer*, bool) constructor.
++        sp<ANativeWindowBuffer> wrappedBuffer;
++        // Death callbacks (BufferStateLayer caching), same semantics as
++        // upstream, only stored out of line.
++        std::vector<std::pair<GraphicBufferDeathCallback, void* /*mDeathCallbackContext*/>>
++                deathCallbacks;
++    };
++
++    BufferState* mBufferState;
+ };
+ 
+ }; // namespace android

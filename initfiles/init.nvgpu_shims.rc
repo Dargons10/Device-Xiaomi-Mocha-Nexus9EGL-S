@@ -12,5 +12,49 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Android 12 ya NO consume TARGET_LD_SHIM_LIBS (linkerconfig no tiene mecanismo shim):
+# los shims de blobs NVIDIA 4.4 (android_atomic_*, zygote whitelist) se inyectan por LD_PRELOAD
+# PERO con `setenv` POR SERVICIO, nunca con `export` global.
+#
+# Por que NO export global (comprobado en boot_log.txt del 26-10-2026 18:07):
+#   F linker: CANNOT LINK EXECUTABLE "/apex/com.android.sdkext/bin/derive_sdk":
+#       library "/vendor/lib/libshim_atomic.so" ... not accessible for the namespace "(default)"
+#   (tambien derive_classpath, com.android.os.statsd/bin/statsd y
+#    com.android.conscrypt/bin/boringssl_self_test32)  -> 4 binarios APEX revientan al enlazar.
+# Los ejecutables de /apex corren en el namespace "(default)", que NO ve /vendor/lib.
+#
+# Como $LIB tampoco existe en este arbol (no-Treble), las rutas deben ser literales de 32 bits.
+# El preload de zygote (y por tanto de todas las apps) ya se hace con setenv en el parche
+#   patches/system/core/0001-init-zygote32-ld-preload-shim.patch
+#   -> system/core/rootdir/init.zygote32.rc: setenv LD_PRELOAD /system/lib/libshim_zw.so:/vendor/lib/libshim_atomic.so
+# Si hiciera falta en surfaceflinger/HALs, anadir la misma linea con `setenv` en
+# frameworks/native/data/etc/surfaceflinger.rc (o en el .rc del HAL), jams export global.
 on early-init
-    export LD_PRELOAD "/system/${LIB}/libshim_zw.so"
+    write /dev/kmsg "mocha: nvgpu shims via per-service setenv (zygote); no LD_PRELOAD global"
+
+# Diagnostica graficos (2026-10-26): los avisos de inicializacion de los blobs NVIDIA/Tegra
+# (NvOsDebugPrintf -> stderr) los descarta init porque el stderr de los servicios va a
+# /dev/null. Con debug.sf.stderr=1, surfaceflinger (parche en main_surfaceflinger.cpp) los
+# vuelca a /data/system/sf.err, que sobrevive al crash-loop y es legible desde adb o TWRP.
+# Desactivar quitando la linea (o con `setprop debug.sf.stderr 0`).
+on early-init
+    setprop debug.sf.stderr 1
+
+# shim de atomic también para los HAL vendor que lo necesiten (setenv por servicio):
+#   service vendor.hwcomposer-2-1 ...  setenv LD_PRELOAD /vendor/lib/libshim_atomic.so
+
+# --- 2026-10-26 (F6): sonda NvCPL sin tocar la GPU --------------------------------------
+# `mocha_glprobe --nvcpl` SOLO llama a libnvcpl.so (nada de EGL/GPU). Se arranca en
+# post-fs-data, es decir antes de que surfaceflinger empiece su crash-loop (~18 s), para:
+#   1) no necesitar adb (el device se cuelga en cuanto otra proceso toca la GPU con SF
+#      reiniciandose 100 veces: adb shell deja de responder),
+#   2) saber que devuelve el blob real de NvCPL cuando no existe servicio 'nvcpl'.
+# Resultado: /data/local/tmp/glprobe_nvcpl.log (legible desde adb o desde TWRP montando UDA).
+# Quitar el arranque automatico comentando el `start` de abajo.
+service mocha_glprobe_nvcpl /system/bin/mocha_glprobe --nvcpl --log /data/local/tmp/glprobe_nvcpl.log
+    class core
+    disabled
+    oneshot
+
+on post-fs-data
+    start mocha_glprobe_nvcpl

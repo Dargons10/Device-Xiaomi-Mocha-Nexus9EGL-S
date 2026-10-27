@@ -11,6 +11,11 @@
 /dev/imx214     0660    media   camera
 /dev/imx179     0660    media   camera
 /dev/ad5823     0660    media   camera
+# Cámara frontal OV5693 @0x36: misc_register() en
+# kernel/xiaomi/mocha/drivers/media/platform/tegra/ov5693.c la crea sólo cuando
+# el stack NVC (pcl-generic) instancia el módulo, es decir en tiempo de ejecución.
+# Sin regla de ueventd quedaría 0600 root:root y el HAL no podría abrirla.
+/dev/ov5693     0660    media   camera
 /dev/imx219     0660    media   camera
 /dev/ar0261     0660    media   camera
 # Direct sensor register access from the camera HAL (IMX179 @0x10,

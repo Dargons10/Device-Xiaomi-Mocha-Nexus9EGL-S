@@ -1,3 +1,12 @@
-allow servicemanager init-renderer-sh:dir r_dir_perms;
-allow servicemanager init-renderer-sh:file r_file_perms;
-allow servicemanager init-renderer-sh:process getattr;
+# Desactivado en 19.1 (F8/B0): estas reglas son del shim legacy `init-renderer-sh`
+# (render core de livedisplay) que NO se instala en este árbol
+#   mocha.mk:208  #PRODUCT_PACKAGES += vendor.lineage.livedisplay@2.0-service-nvidia
+# y cuyo dominio se declara solo en sepolicy/lineage/vendor/init-renderer-sh.te, directorio
+# que no está en BOARD_VENDOR_SEPOLICY_DIRS. Con el sepolicy de device entrando ya en la vía
+# Make (BOARD_VENDOR_SEPOLICY_DIRS con rutas literales), esto rompía checkpolicy con
+# "unknown type init-renderer-sh".
+# Si alguna vez se porta livedisplay/render-sh, descomentar y añadir
+# device/xiaomi/mocha/sepolicy/lineage/vendor a BOARD_VENDOR_SEPOLICY_DIRS.
+#allow servicemanager init-renderer-sh:dir r_dir_perms;
+#allow servicemanager init-renderer-sh:file r_file_perms;
+#allow servicemanager init-renderer-sh:process getattr;

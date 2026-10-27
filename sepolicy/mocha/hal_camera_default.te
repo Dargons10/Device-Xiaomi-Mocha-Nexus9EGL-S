@@ -17,7 +17,15 @@
 #
 # The legacy sensor shim (libmocha_sensor_shim) talks to the system
 # sensors service to provide the accelerometer/gyro used for EIS.
-allow hal_camera_default sensors_service:service_manager find;
+#
+# OJO (port 17.1 -> 19.1): en A12 el tipo `sensors_service` YA NO EXISTE
+# (grep -rn '^type sensors_service' system/sepolicy/ = vacío). El servicio se llama
+# `sensorservice` (live: service list -> "160 sensorservice: [android.gui.SensorServer]",
+# vive en system_server) y su tipo público es `sensorservice_service`
+# (system/sepolicy/public/service.te:191). Usar el nombre del 17.1 rompe checkpolicy:
+#   sepolicy/mocha/hal_camera_default.te:21:ERROR 'unknown type sensors_service'
+allow hal_camera_default sensorservice_service:service_manager find;
+allow hal_camera_default system_server:binder call;
 
 # Legacy binder mode (ro.camera.legacy_system_binder=true): the provider
 # process opens /dev/binder instead of /dev/vndbinder, registers its HIDL

@@ -158,7 +158,17 @@ PRODUCT_PACKAGES += \
     libshim_zw \
     libshim_atomic \
     libmocha_omx \
-    libnvomxadaptor_shim
+    libnvomxadaptor_shim \
+    mocha_glprobe
+
+# El unico allocator con servicio/manifest de este dispositivo es @2.0 (arriba y en
+# manifest.xml:67). libui prueba primero allocator 4.x y 3.x vía IAllocator::getService(),
+# y hwservicemanager pierde ~1 s intentando arrancarlas como HAL lazy: ~2 s por cada
+# proceso que construye GraphicBufferAllocator. Ver el comentario en
+# frameworks/native/libs/ui/GraphicBufferAllocator.cpp (parche local).
+# Debe coincidir con la unica version de mapper instalada (mapper@2.0-impl).
+PRODUCT_VENDOR_PROPERTIES += \
+    ro.vendor.graphics.allocator.max_version=2
 
 #GO
 #$(call inherit-product, device/xiaomi/mocha/go_mocha.mk)

@@ -1,0 +1,46 @@
+From: mocha port <local>
+Subject: [PATCH 0005] init: skip writepid targets of controllers the kernel lacks
+
+Companion to 0004 (legacy cgroup profiles). WritePidToFiles() writes every
+"writepid" target of a service and returns on the FIRST failure, so a platform
+.rc line like "writepid /dev/stune/foreground/tasks" (or /dev/cpuset/...) makes
+the remaining, valid targets of the same service never written - on mocha neither
+CONFIG_CPUSETS nor CONFIG_SCHEDTUNE exists, so /dev/stune and /dev/cpuset groups
+are plain directories (or absent) and every such service loses its real
+/dev/cpuctl/<group>/tasks membership.
+
+Skip targets whose controller is not configured, keep the errors for groups that
+are missing on a configured controller, and stop logging "cpuset cgroup
+controller is not mounted!" on every service start (it is the normal state of
+this kernel). Same idea as the r15 "mocha stock boot configuration" work of the
+Abobo7 lineage-17.1 tree, adapted to the A12 service_utils.cpp split.
+---
+diff --git a/init/service_utils.cpp b/init/service_utils.cpp
+index f2383d7a6..1bb8dfa31 100644
+--- a/init/service_utils.cpp
++++ b/init/service_utils.cpp
+@@ -305,10 +305,23 @@ Result<void> WritePidToFiles(std::vector<std::string>* files) {
+             }
+         }
+     } else {
+-        LOG(ERROR) << "cpuset cgroup controller is not mounted!";
++        // No error: el kernel 3.10 de mocha no compila CONFIG_CPUSETS (el mount de
++        // cpuset falla siempre), y en A12 esto se llama en CADA start de servicio.
+     }
+     std::string pid_str = std::to_string(getpid());
+     for (const auto& file : *files) {
++        // Legacy kernels may not implement these optional controllers: skip their
++        // groups instead of failing, otherwise the loop returns here and the real
++        // writepid targets of the same service (e.g. /dev/cpuctl/.../tasks) are
++        // never written. Retain errors for a missing group on a configured
++        // controller.
++        std::string controller_path;
++        if ((StartsWith(file, "/dev/cpuset/") &&
++             !CgroupGetControllerPath("cpuset", &controller_path)) ||
++            (StartsWith(file, "/dev/stune/") &&
++             !CgroupGetControllerPath("schedtune", &controller_path))) {
++            continue;
++        }
+         if (!WriteStringToFile(pid_str, file)) {
+             return ErrnoError() << "couldn't write " << pid_str << " to " << file;
+         }

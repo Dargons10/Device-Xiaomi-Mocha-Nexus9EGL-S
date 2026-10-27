@@ -1,0 +1,87 @@
+diff --git a/arch/arm/boot/dts/tegra124-mocha.dts b/arch/arm/boot/dts/tegra124-mocha.dts
+index eb9564a18d3..43b9b7318e1 100644
+--- a/arch/arm/boot/dts/tegra124-mocha.dts
++++ b/arch/arm/boot/dts/tegra124-mocha.dts
+@@ -12,7 +12,14 @@
+ /* end of static dtsi files */
+ 
+ #include "tegra124-platforms/tegra124-mocha-sysedp.dtsi"
+-#include "tegra124-platforms/tegra124-mocha-camera.dtsi"
++/* F9b: pipeline V4L2 propia (nvidia,mocha-vi + subdevs imx179/ov5693/ad5823).
++ * El SoC `vi` se desactiva abajo y el captador real es el nodo mocha-vi de
++ * tegra124-mocha-camera-mc.dtsi. Variantes alternativas:
++ *   - tegra124-mocha-camera.dtsi     (legacy NVC/pcl, camera.pcl)
++ *   - tegra124-mocha-camera-tvc.dtsi (legacy TVC, requiere GRHOST)
++ * Revertir = cambiar solo esta linea.
++ */
++#include "tegra124-platforms/tegra124-mocha-camera-mc.dtsi"
+ #include "panel-s-wqxga-7-9-x6.dtsi"
+ 
+ / {
+diff --git a/arch/arm/boot/dts/tegra124-platforms/tegra124-mocha-camera-mc.dtsi b/arch/arm/boot/dts/tegra124-platforms/tegra124-mocha-camera-mc.dtsi
+index 6734b3b7970..dc45002364a 100644
+--- a/arch/arm/boot/dts/tegra124-platforms/tegra124-mocha-camera-mc.dtsi
++++ b/arch/arm/boot/dts/tegra124-platforms/tegra124-mocha-camera-mc.dtsi
+@@ -163,6 +163,10 @@
+             physical_h = "2.738";
+             sensor_model = "imx179";
+ 
++            /* MCLK1 (id CAR 20, mismo que tegra124-mocha-camera-tvc.dtsi) */
++            clocks = <&tegra_car 20>;
++            clock-names = "mclk";
++
+             /* GPIOs */
+             reset-gpios = <&gpio TEGRA_GPIO(BB, 3) GPIO_ACTIVE_HIGH>;
+             af-gpios = <&gpio TEGRA_GPIO(BB, 7) GPIO_ACTIVE_HIGH>;
+@@ -217,6 +221,10 @@
+             physical_h = "2.738";
+             sensor_model = "ov5693";
+ 
++            /* MCLK2 (id CAR 21, mismo que tegra124-mocha-camera-tvc.dtsi) */
++            clocks = <&tegra_car 21>;
++            clock-names = "mclk";
++
+             /* GPIOs */
+             reset-gpios = <&gpio TEGRA_GPIO(CC, 1) GPIO_ACTIVE_HIGH>;
+             pwdn-gpios = <&gpio TEGRA_GPIO(BB, 6) GPIO_ACTIVE_HIGH>;
+diff --git a/arch/arm/configs/tegra12_android_defconfig b/arch/arm/configs/tegra12_android_defconfig
+index 8365e85cff7..c3b621efe32 100644
+--- a/arch/arm/configs/tegra12_android_defconfig
++++ b/arch/arm/configs/tegra12_android_defconfig
+@@ -4,7 +4,7 @@ CONFIG_HIGH_RES_TIMERS=y
+ CONFIG_IKCONFIG=y
+ CONFIG_IKCONFIG_PROC=y
+ CONFIG_CGROUPS=y
+-CONFIG_CGROUP_DEBUG=y
++# CONFIG_CGROUP_DEBUG is not set
+ CONFIG_CGROUP_FREEZER=y
+ CONFIG_CGROUP_CPUACCT=y
+ CONFIG_RESOURCE_COUNTERS=y
+@@ -580,7 +580,7 @@ CONFIG_LOCKUP_DETECTOR=y
+ CONFIG_SCHEDSTATS=y
+ # CONFIG_DEBUG_PREEMPT is not set
+ CONFIG_DEBUG_INFO=y
+-CONFIG_DEBUG_VM=y
++# CONFIG_DEBUG_VM is not set
+ CONFIG_FUNCTION_TRACER=y
+ # CONFIG_FUNCTION_GRAPH_TRACER is not set
+ CONFIG_DYNAMIC_DEBUG=y
+@@ -689,10 +689,14 @@ CONFIG_DTS_INV_MPU_IIO=y
+ 
+ # Cameras
+ # F2: legacy NVIDIA NVC/TVC drivers enabled (OF probe via tegra124-mocha-camera-tvc.dtsi)
+-CONFIG_VIDEO_IMX179=y
+-CONFIG_VIDEO_AD5823=y
+-CONFIG_VIDEO_OV5693=y
+-CONFIG_VIDEO_CAMERA=y
++# F9b: los clientes i2c nacen del DT y deben los claim los subdev V4L2
++# (drivers/media/platform/tegra/v4l2/sensors/*). Las variantes legacy
++# (miscdev /dev/imx179, /dev/ov5693, camera.pcl) se desactivan para que
++# no se queden con los mismos clientes i2c ni con platform_data NULL.
++# CONFIG_VIDEO_IMX179 is not set
++# CONFIG_VIDEO_AD5823 is not set
++# CONFIG_VIDEO_OV5693 is not set
++# CONFIG_VIDEO_CAMERA is not set
+ # V4L2 camera pipeline (kept compiled; DT compatibles removed so they stay inert)
+ CONFIG_VIDEO_MOCHA_V4L2=y
+ CONFIG_VIDEO_TEGRA_VI_V4L2=y

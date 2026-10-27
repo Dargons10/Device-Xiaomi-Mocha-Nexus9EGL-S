@@ -1,0 +1,80 @@
+# OJO: las entradas para rutas de la RAIZ (/gl, /lbh, /oem ...) NO pueden vivir solo
+# aquí: la etiqueta que usa e2fsdroid al empaquetar las particiones viene del
+# file_contexts.bin Mergeado por la via Make (system/sepolicy/Android.mk ->
+# SELINUX_FC en build/make/core/Makefile:1606), y en este arbol los directorios de
+# BOARD_VENDOR_SEPOLICY_DIRS del BoardConfig no llegan a ese merge (ver
+# BoardConfig.mk). El canal que sí llega es LOCAL_FILE_CONTEXTS de un modulo
+# instalado -> root_file_contexts, enlazado desde initfiles/Android.mk.
+#
+# Aquí van las etiquetas de rutas de /vendor y /system normales.
+
+#
+# NODOS DE CÁMARA (F8: 0 cámaras).
+#
+# Los nodos creados por el kernel en devtmpfs los etiqueta
+# ueventd con setfscreatecon() (system/core/init/ueventd.cpp:72) a partir de
+# /vendor/etc/selinux/vendor_file_contexts. Ese fichero lo genera Soong
+# fusionando los `file_contexts` de los directorios LEAF de
+# BOARD_VENDOR_SEPOLICY_DIRS (BoardConfig.mk:259). sepolicy/common/{vendor,...}
+# NO se recorre (los directorios no son planos) -> nunca llegó a ninguna
+# partición y /dev/camera.pcl, /dev/imx179, /dev/ov5693, /dev/ad5823 y
+# /dev/mipi-cal se quedaron en u:object_r:device:s0 (verificado en vivo:
+#   ls -Z /dev/camera.pcl -> u:object_r:device:s0).
+# Un dominio vendor (hal_camera_default) no puede abrir un nodo etiquetado
+# `device`, así que el HAL veía 0 dispositivos aunque pcl-generic estuviera
+# probeado. Por eso las entradas viven AQUÍ (directorio plano y declarado).
+# camera_device ya existe en A12 (system/sepolicy/public/device.te:10) y
+# hal_camera tiene permiso: system/sepolicy/public/hal_camera.te:10
+#   allow hal_camera camera_device:chr_file rw_file_perms;
+# (y el neverallow de :38 sólo lo permite a hal_camera_server -> legal).
+# ueventd puede crear nodos de cualquier dev_type:
+#   allow ueventd dev_type:chr_file { getattr create setattr unlink }
+#
+/dev/camera\.pcl              u:object_r:camera_device:s0
+/dev/mipi-cal                 u:object_r:camera_device:s0
+/dev/imx179                 u:object_r:camera_device:s0
+/dev/ov5693                 u:object_r:camera_device:s0
+/dev/ov5693\..*             u:object_r:camera_device:s0
+/dev/ad5823                 u:object_r:camera_device:s0
+/dev/focuser                u:object_r:camera_device:s0
+/dev/focuser\..*            u:object_r:camera_device:s0
+
+#
+# Camino de captura del stack Tegra (nvhost VI/ISP) y control de cámara.
+# Estos nodos aparecen de forma diferida (cuando el HAL abre el módulo nvhost
+# correspondiente): hoy NO existen en vivo, aunque `vi`, `tegra-vi`, `isp` y
+# `tsec` ya figuran como platform drivers en /sys/bus/platform/drivers/.
+# Si al crearse no tienen etiqueta se quedan en `device` y un dominio vendor no
+# puede abrirlos -> el HAL enumera la cámara pero no consigue imagen.
+# Mismas etiquetas que la lista contrastada de Abobo7 17.1 y que nuestro propio
+# sepolicy/common/vendor/file_contexts (ese fichero no se consume: ver aviso
+# al principio de este archivo).
+#
+/dev/nvhost-ctrl-vi([0-9]|\.1)?    u:object_r:camera_device:s0
+/dev/nvhost-vi([0-9]|\.1)?         u:object_r:camera_device:s0
+/dev/nvhost-ctrl-isp([0-9]|\.1)?   u:object_r:camera_device:s0
+/dev/nvhost-isp([0-9]|\.1)?        u:object_r:camera_device:s0
+/dev/tegra_camera_ctrl             u:object_r:camera_device:s0
+/dev/torch(\..*)?                  u:object_r:camera_device:s0
+
+# Codificador/decodificadores Tegra (los usará NVOMX cuando exponga codecs HW:
+# hace falta dar permiso explícito al dominio de codecs -> pendiente con F8 vídeo).
+/dev/nvhost-msenc                  u:object_r:video_device:s0
+/dev/nvhost-nvdec([0-9])?          u:object_r:video_device:s0
+/dev/nvhost-nvenc([0-9])?          u:object_r:video_device:s0
+/dev/nvhost-nvjpg                  u:object_r:gpu_device:s0
+
+# OJO: NO se etiquetan aquí /dev/nvmap, /dev/nvhost-*gpu, /dev/tegra_dc_*,
+# /dev/nvhost-tsec, /dev/tegra_cec, /dev/tegra_cpc, /dev/ozwpan, /dev/quadd*
+# ni /dev/socket/{nvphsd,charon*} aunque estén en common/vendor/file_contexts:
+#   * gpu_device/tsec_device/tegradc_device/cpc_device/tegracec_device/
+#     ozmo_device/quadd_device/nvphsd_socket/charon_socket NO están todos
+#     definidos en un directorio consumido (los privativos viven en
+#     common/vendor/file.te, que no entra en el merge) -> usarlos aquí rompe
+#     checkpolicy con "unknown type".
+#   * Los nodos gráficos hoy funcionan etiquetados como `device`; cambiarles la
+#     etiqueta sin tener a la vez los `allow` correspondientes (hal_camera,
+#     surfaceflinger, zygote/app, mediacodec) regresaría los gráficos.
+#     Queda para la ronda dedicada de graphics sepolicy + F10 (enforcing).
+
+

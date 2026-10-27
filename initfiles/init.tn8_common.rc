@@ -17,10 +17,12 @@ on early-init
     chmod 0755 /lbh
     chown root system /lbh
 
-    #hack to make hacked mipad GL blobs work (need /gl/libEGL_tegra.so path)
-    symlink /system/lib/egl /gl
-    chmod 0755 /gl
-    chown root system /gl
+    # /gl (necesario por el wrapper GLESv2 NVIDIA: dlopen("/gl/libEGL_tegra.so"))
+    # va HORNEADO en la raiz de system.img via BOARD_ROOT_EXTRA_SYMLINKS en
+    # BoardConfig.mk. Aqui ya no se intenta: el root es read-only desde Android 10
+    # (logcat: 'symlink /system/lib/egl /gl' -> symlink() failed: Read-only file
+    # system) y crearlo tarde es inutil porque surfaceflinger/hwcomposer arrancan
+    # antes de que exista cualquier escritura.
 
 
     write /sys/bus/i2c/devices/i2c-2/clock_rate 100000

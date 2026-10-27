@@ -264,6 +264,18 @@ void Light::setNotificationLight(const LightState& state) {
     setSpeakerBatteryLightLocked();
 }
 
+// Escribe un valor en un nodo sysfs solo si cambia y solo si el stream esta abierto.
+// Los atributos de lp5521 (run_engine/select_engine) y leds/*/brightness son
+// transacciones I2C sincronicas: reescribir el mismo valor cuesta tiempo de binder
+// y de kernel sin ningun beneficio.
+void Light::writeSysfsLocked(std::ofstream& stream, int value, int& lastWritten) {
+    if (!stream.is_open() || lastWritten == value) {
+        return;
+    }
+    stream << value << std::endl;
+    lastWritten = value;
+}
+
 void Light::setSpeakerBatteryLightLocked() {
     if (isLit(mNotificationState)) {
         setSpeakerLightLocked(mNotificationState);
@@ -273,10 +285,10 @@ void Light::setSpeakerBatteryLightLocked() {
         setSpeakerLightLocked(mBatteryState);
     } else {
         // Lights off
-        mLedRunEngine << 0 << std::endl;
-        mRedLed << 0 << std::endl;
-        mGreenLed << 0 << std::endl;
-        mBlueLed << 0 << std::endl;
+        writeSysfsLocked(mLedRunEngine, 0, mLastLedRun);
+        writeSysfsLocked(mRedLed, 0, mLastRedLed);
+        writeSysfsLocked(mGreenLed, 0, mLastGreenLed);
+        writeSysfsLocked(mBlueLed, 0, mLastBlueLed);
     }
 }
 
@@ -286,12 +298,20 @@ void Light::setSpeakerLightLocked(const LightState& state) {
     uint32_t colorRGB = state.color;
     struct color *nearest = NULL;
     
-    // Disable all blinking to start
-    mLedRunEngine << 0 << std::endl;
-    mRedLed << 0 << std::endl;
-    mGreenLed << 0 << std::endl;
-    mBlueLed << 0 << std::endl;
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // Disable all blinking to start.
+    // OJO: aqui habia un sleep_for(100ms) INCONDICIONAL en cada llamada.
+    // frameworks/base/services/core/jni/com_android_server_lights_LightsService.cpp:168
+    // avisa pasado ese umbral:
+    //   if (t.duration() > 50ms) ALOGD("Excessive delay setting light");
+    // que aparecio 1016 veces en las 7h26m de log capturadas, y detras de el
+    // aparecen los 'Long monitor contention with owner HwBinder:... BatteryService.update'
+    // en system_server: la llamada HIDL a Lights hal bloqueaba el monitor de
+    // BatteryService >100ms (tambien en el camino de apagado de pantalla).
+    // Las escrituras sysfs del driver lp5521 son sincronicas, no hace falta esperar.
+    writeSysfsLocked(mLedRunEngine, 0, mLastLedRun);
+    writeSysfsLocked(mRedLed, 0, mLastRedLed);
+    writeSysfsLocked(mGreenLed, 0, mLastGreenLed);
+    writeSysfsLocked(mBlueLed, 0, mLastBlueLed);
 
     switch (state.flashMode) {
         case Flash::TIMED:
@@ -330,23 +350,24 @@ void Light::setSpeakerLightLocked(const LightState& state) {
         else if (offMs > 7000)
             offMs = 7000;
             
+        // Programacion del motor de parpadeo: era 3 x sleep_for(100ms) (hasta 300ms
+        // por llamada). Se deja un unico settle corto (10ms) antes de arrancar el
+        // motor, por debajo del umbral de 50ms del JNI de LightsService.
         if (blink && red) {
-            mLedSelectEngine << 1 << std::endl;
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            writeSysfsLocked(mLedSelectEngine, 1, mLastLedSelect);
         }
         if (blink && green) {
-            mLedSelectEngine << 2 << std::endl;
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            writeSysfsLocked(mLedSelectEngine, 2, mLastLedSelect);
         }
         if (blink && blue) {
-            mLedSelectEngine << 3 << std::endl;
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            writeSysfsLocked(mLedSelectEngine, 3, mLastLedSelect);
         }
-        mLedRunEngine << 1 << std::endl;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        writeSysfsLocked(mLedRunEngine, 1, mLastLedRun);
     } else {
-        mRedLed << red << std::endl;
-        mGreenLed << green << std::endl;
-        mBlueLed << blue << std::endl;
+        writeSysfsLocked(mRedLed, red, mLastRedLed);
+        writeSysfsLocked(mGreenLed, green, mLastGreenLed);
+        writeSysfsLocked(mBlueLed, blue, mLastBlueLed);
     }
 }
 

@@ -1,0 +1,25 @@
+# /gl es el symlink horneado en la raiz de system.img
+# (BoardConfig.mk -> BOARD_ROOT_EXTRA_SYMLINKS += /system/lib/egl:gl) que
+# necesita el wrapper GLESv2 de NVIDIA: su helper de registro de funciones
+# "client" hace NvOsLibraryLoad("/gl/libEGL_tegra.so") y NvOsLibraryLoad pasa la
+# literal tal cual a dlopen().
+#
+# Sin etiqueta, e2fsdroid aborta el empaquetado de la particion:
+#   set_selinux_xattr: No such file or directory searching for label "/gl"
+#   e2fsdroid: No such file or directory while configuring the system image
+#
+# rootfs es el tipo que A12 usa para el resto de entradas de la raiz
+# (/proc, /bin, /etc -> u:object_r:rootfs:s0) y system/sepolicy/public/domain.te
+# ya permite a TODOS los dominios:
+#   allow domain rootfs:dir search;
+#   allow domain rootfs:lnk_file { read getattr };
+# asi que seguir /gl -> /system/lib/egl no necesita reglas extra.
+/gl    u:object_r:rootfs:s0
+# target_files mete en la RAIZ de la imagen la copia del file_contexts.bin fusionado
+# (out/.../root/file_contexts.bin -> META/.../ROOT/file_contexts.bin). Sin etiqueta,
+# fs_config emite 'selabel=u:object_r:unlabeled:s0' y e2fsdroid aborta igual que con /gl:
+#   set_selinux_xattr: No such file or directory searching for label "/file_contexts.bin"
+#   FAILED: obj/PACKAGING/target_files_intermediates/lineage_mocha-target_files-eng.*.zip
+# file_contexts_file es el tipo público que A12 ya usa para las dbs de file_contexts
+# (system/sepolicy/public/file.te:543; p.ej. /system/etc/selinux/plat_file_contexts).
+/file_contexts\.bin    u:object_r:file_contexts_file:s0

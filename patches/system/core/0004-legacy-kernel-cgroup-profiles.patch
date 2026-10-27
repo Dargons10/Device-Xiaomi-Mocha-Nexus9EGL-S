@@ -1,0 +1,939 @@
+From: mocha port <local>
+Subject: [PATCH 0004] libprocessgroup/rootdir: adapt cgroup profiles to the 3.10 kernel
+
+The A12 defaults assume cgroup v1 with cpuset+blkio+schedtune and a cgroup v2
+unified hierarchy for the freezer. The Xiaomi Mi Pad 1 kernel (3.10, Tegra)
+compiles CONFIG_CGROUPS/CGROUP_SCHED/CGROUP_FREEZER/MEMCG/CGROUP_CPUACCT only:
+CONFIG_CPUSETS, CONFIG_BLK_CGROUP and CONFIG_SCHEDTUNE are absent and there is
+no cgroup2 mount (/sys/fs/cgroup is plain sysfs).
+
+Consequences measured in the F6 boot log (logs_f6/logcat_boot4.log):
+  - "Failed to mount blkio cgroup: No such file or directory"
+  - "Failed to mount cpuset cgroup: No such device" (init also asks for kmod
+    fs-cpuset, which does not exist)
+  - 574 x "Failed to add task into cgroup" (JoinCgroup actions for cpuset/blkio)
+  - "Controller freezer is not found" + "SetAttribute: unknown attribute:
+    FreezerState" (no cgroup2 freezer)
+  - init.rc cpuset copy/mkdir failures and
+    "property 'ro.bionic.2nd_arch' doesn't exist" (arm32-only device)
+
+Keep every profile name (Java callers resolve them) but drop the actions that
+reference controllers this kernel cannot provide, drop the cpu.uclamp.*
+attributes (utilclamp arrived in 5.3) and the unsupported SetClamps actions,
+and remove the init.rc blocks that only produced errors.
+---
+diff --git a/libprocessgroup/profiles/cgroups.json b/libprocessgroup/profiles/cgroups.json
+index ded118e..8790268 100644
+--- a/libprocessgroup/profiles/cgroups.json
++++ b/libprocessgroup/profiles/cgroups.json
+@@ -1,12 +1,5 @@
+ {
+   "Cgroups": [
+-    {
+-      "Controller": "blkio",
+-      "Path": "/dev/blkio",
+-      "Mode": "0755",
+-      "UID": "system",
+-      "GID": "system"
+-    },
+     {
+       "Controller": "cpu",
+       "Path": "/dev/cpuctl",
+@@ -14,13 +7,6 @@
+       "UID": "system",
+       "GID": "system"
+     },
+-    {
+-      "Controller": "cpuset",
+-      "Path": "/dev/cpuset",
+-      "Mode": "0755",
+-      "UID": "system",
+-      "GID": "system"
+-    },
+     {
+       "Controller": "memory",
+       "Path": "/dev/memcg",
+diff --git a/libprocessgroup/profiles/task_profiles.json b/libprocessgroup/profiles/task_profiles.json
+index 45d3c7c..98c020e 100644
+--- a/libprocessgroup/profiles/task_profiles.json
++++ b/libprocessgroup/profiles/task_profiles.json
+@@ -1,20 +1,5 @@
+ {
+   "Attributes": [
+-    {
+-      "Name": "LowCapacityCPUs",
+-      "Controller": "cpuset",
+-      "File": "background/cpus"
+-    },
+-    {
+-      "Name": "HighCapacityCPUs",
+-      "Controller": "cpuset",
+-      "File": "foreground/cpus"
+-    },
+-    {
+-      "Name": "MaxCapacityCPUs",
+-      "Controller": "cpuset",
+-      "File": "top-app/cpus"
+-    },
+     {
+       "Name": "MemLimit",
+       "Controller": "memory",
+@@ -29,37 +14,15 @@
+       "Name": "MemSwappiness",
+       "Controller": "memory",
+       "File": "memory.swappiness"
+-    },
+-    {
+-      "Name": "UClampMin",
+-      "Controller": "cpu",
+-      "File": "cpu.uclamp.min"
+-    },
+-    {
+-      "Name": "UClampMax",
+-      "Controller": "cpu",
+-      "File": "cpu.uclamp.max"
+-    },
+-    {
+-      "Name": "UClampLatencySensitive",
+-      "Controller": "cpu",
+-      "File": "cpu.uclamp.latency_sensitive"
+-    },
+-    {
+-      "Name": "FreezerState",
+-      "Controller": "freezer",
+-      "File": "cgroup.freeze"
+     }
+   ],
+-
+   "Profiles": [
+     {
+       "Name": "HighEnergySaving",
+       "Actions": [
+         {
+           "Name": "JoinCgroup",
+-          "Params":
+-          {
++          "Params": {
+             "Controller": "cpu",
+             "Path": "background"
+           }
+@@ -68,37 +31,18 @@
+     },
+     {
+       "Name": "Frozen",
+-      "Actions": [
+-        {
+-          "Name": "SetAttribute",
+-          "Params":
+-          {
+-            "Name": "FreezerState",
+-            "Value": "1"
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+     {
+       "Name": "Unfrozen",
+-      "Actions": [
+-        {
+-          "Name": "SetAttribute",
+-          "Params":
+-          {
+-            "Name": "FreezerState",
+-            "Value": "0"
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+     {
+       "Name": "NormalPerformance",
+       "Actions": [
+         {
+           "Name": "JoinCgroup",
+-          "Params":
+-          {
++          "Params": {
+             "Controller": "cpu",
+             "Path": "system"
+           }
+@@ -110,8 +54,7 @@
+       "Actions": [
+         {
+           "Name": "JoinCgroup",
+-          "Params":
+-          {
++          "Params": {
+             "Controller": "cpu",
+             "Path": "system-background"
+           }
+@@ -123,8 +66,7 @@
+       "Actions": [
+         {
+           "Name": "JoinCgroup",
+-          "Params":
+-          {
++          "Params": {
+             "Controller": "cpu",
+             "Path": "foreground"
+           }
+@@ -136,8 +78,7 @@
+       "Actions": [
+         {
+           "Name": "JoinCgroup",
+-          "Params":
+-          {
++          "Params": {
+             "Controller": "cpu",
+             "Path": "top-app"
+           }
+@@ -149,8 +90,7 @@
+       "Actions": [
+         {
+           "Name": "JoinCgroup",
+-          "Params":
+-          {
++          "Params": {
+             "Controller": "cpu",
+             "Path": "rt"
+           }
+@@ -162,8 +102,7 @@
+       "Actions": [
+         {
+           "Name": "JoinCgroup",
+-          "Params":
+-          {
++          "Params": {
+             "Controller": "cpu",
+             "Path": "camera-daemon"
+           }
+@@ -175,8 +114,7 @@
+       "Actions": [
+         {
+           "Name": "JoinCgroup",
+-          "Params":
+-          {
++          "Params": {
+             "Controller": "cpu",
+             "Path": "nnapi-hal"
+           }
+@@ -188,8 +126,7 @@
+       "Actions": [
+         {
+           "Name": "JoinCgroup",
+-          "Params":
+-          {
++          "Params": {
+             "Controller": "cpu",
+             "Path": "dex2oat"
+           }
+@@ -198,277 +135,90 @@
+     },
+     {
+       "Name": "CpuPolicySpread",
+-      "Actions": [
+-        {
+-          "Name": "SetAttribute",
+-          "Params":
+-          {
+-            "Name": "UClampLatencySensitive",
+-            "Value": "1"
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+     {
+       "Name": "CpuPolicyPack",
+-      "Actions": [
+-        {
+-          "Name": "SetAttribute",
+-          "Params":
+-          {
+-            "Name": "UClampLatencySensitive",
+-            "Value": "0"
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+-
+     {
+       "Name": "VrKernelCapacity",
+-      "Actions": [
+-        {
+-          "Name": "JoinCgroup",
+-          "Params":
+-          {
+-            "Controller": "cpuset",
+-            "Path": ""
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+     {
+       "Name": "VrServiceCapacityLow",
+-      "Actions": [
+-        {
+-          "Name": "JoinCgroup",
+-          "Params":
+-          {
+-            "Controller": "cpuset",
+-            "Path": "system/background"
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+     {
+       "Name": "VrServiceCapacityNormal",
+-      "Actions": [
+-        {
+-          "Name": "JoinCgroup",
+-          "Params":
+-          {
+-            "Controller": "cpuset",
+-            "Path": "system"
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+     {
+       "Name": "VrServiceCapacityHigh",
+-      "Actions": [
+-        {
+-          "Name": "JoinCgroup",
+-          "Params":
+-          {
+-            "Controller": "cpuset",
+-            "Path": "system/performance"
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+     {
+       "Name": "VrProcessCapacityLow",
+-      "Actions": [
+-        {
+-          "Name": "JoinCgroup",
+-          "Params":
+-          {
+-            "Controller": "cpuset",
+-            "Path": "application/background"
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+     {
+       "Name": "VrProcessCapacityNormal",
+-      "Actions": [
+-        {
+-          "Name": "JoinCgroup",
+-          "Params":
+-          {
+-            "Controller": "cpuset",
+-            "Path": "application"
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+     {
+       "Name": "VrProcessCapacityHigh",
+-      "Actions": [
+-        {
+-          "Name": "JoinCgroup",
+-          "Params":
+-          {
+-            "Controller": "cpuset",
+-            "Path": "application/performance"
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+-
+     {
+       "Name": "ProcessCapacityLow",
+-      "Actions": [
+-        {
+-          "Name": "JoinCgroup",
+-          "Params":
+-          {
+-            "Controller": "cpuset",
+-            "Path": "background"
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+     {
+       "Name": "ProcessCapacityNormal",
+-      "Actions": [
+-        {
+-          "Name": "JoinCgroup",
+-          "Params":
+-          {
+-            "Controller": "cpuset",
+-            "Path": ""
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+     {
+       "Name": "ProcessCapacityHigh",
+-      "Actions": [
+-        {
+-          "Name": "JoinCgroup",
+-          "Params":
+-          {
+-            "Controller": "cpuset",
+-            "Path": "foreground"
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+     {
+       "Name": "ProcessCapacityMax",
+-      "Actions": [
+-        {
+-          "Name": "JoinCgroup",
+-          "Params":
+-          {
+-            "Controller": "cpuset",
+-            "Path": "top-app"
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+-
+     {
+       "Name": "ServiceCapacityLow",
+-      "Actions": [
+-        {
+-          "Name": "JoinCgroup",
+-          "Params":
+-          {
+-            "Controller": "cpuset",
+-            "Path": "system-background"
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+     {
+       "Name": "ServiceCapacityRestricted",
+-      "Actions": [
+-        {
+-          "Name": "JoinCgroup",
+-          "Params":
+-          {
+-            "Controller": "cpuset",
+-            "Path": "restricted"
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+-
+     {
+       "Name": "CameraServiceCapacity",
+-      "Actions": [
+-        {
+-          "Name": "JoinCgroup",
+-          "Params":
+-          {
+-            "Controller": "cpuset",
+-            "Path": "camera-daemon"
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+-
+     {
+       "Name": "LowIoPriority",
+-      "Actions": [
+-        {
+-          "Name": "JoinCgroup",
+-          "Params":
+-          {
+-            "Controller": "blkio",
+-            "Path": "background"
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+     {
+       "Name": "NormalIoPriority",
+-      "Actions": [
+-        {
+-          "Name": "JoinCgroup",
+-          "Params":
+-          {
+-            "Controller": "blkio",
+-            "Path": ""
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+     {
+       "Name": "HighIoPriority",
+-      "Actions": [
+-        {
+-          "Name": "JoinCgroup",
+-          "Params":
+-          {
+-            "Controller": "blkio",
+-            "Path": ""
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+     {
+       "Name": "MaxIoPriority",
+-      "Actions": [
+-        {
+-          "Name": "JoinCgroup",
+-          "Params":
+-          {
+-            "Controller": "blkio",
+-            "Path": ""
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+-
+     {
+       "Name": "TimerSlackHigh",
+       "Actions": [
+         {
+           "Name": "SetTimerSlack",
+-          "Params":
+-          {
++          "Params": {
+             "Slack": "40000000"
+           }
+         }
+@@ -479,86 +229,43 @@
+       "Actions": [
+         {
+           "Name": "SetTimerSlack",
+-          "Params":
+-          {
++          "Params": {
+             "Slack": "50000"
+           }
+         }
+       ]
+     },
+-
+     {
+       "Name": "SFMainPolicy",
+-      "Actions": [
+-        {
+-          "Name": "JoinCgroup",
+-          "Params":
+-          {
+-            "Controller": "cpuset",
+-            "Path": "system-background"
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+     {
+       "Name": "SFRenderEnginePolicy",
+-      "Actions": [
+-        {
+-          "Name": "JoinCgroup",
+-          "Params":
+-          {
+-            "Controller": "cpuset",
+-            "Path": "system-background"
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+-
+     {
+       "Name": "PerfBoost",
+-      "Actions": [
+-        {
+-          "Name": "SetClamps",
+-          "Params":
+-          {
+-            "Boost": "50%",
+-            "Clamp": "0"
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+     {
+       "Name": "PerfClamp",
+-      "Actions": [
+-        {
+-          "Name": "SetClamps",
+-          "Params":
+-          {
+-            "Boost": "0",
+-            "Clamp": "30%"
+-          }
+-        }
+-      ]
++      "Actions": []
+     },
+-
+     {
+       "Name": "LowMemoryUsage",
+       "Actions": [
+         {
+           "Name": "SetAttribute",
+-          "Params":
+-          {
++          "Params": {
+             "Name": "MemSoftLimit",
+             "Value": "16MB"
+           }
+         },
+         {
+           "Name": "SetAttribute",
+-          "Params":
+-          {
++          "Params": {
+             "Name": "MemSwappiness",
+             "Value": "150"
+-
+           }
+         }
+       ]
+@@ -568,16 +275,14 @@
+       "Actions": [
+         {
+           "Name": "SetAttribute",
+-          "Params":
+-          {
++          "Params": {
+             "Name": "MemSoftLimit",
+             "Value": "512MB"
+           }
+         },
+         {
+           "Name": "SetAttribute",
+-          "Params":
+-          {
++          "Params": {
+             "Name": "MemSwappiness",
+             "Value": "100"
+           }
+@@ -589,8 +294,7 @@
+       "Actions": [
+         {
+           "Name": "JoinCgroup",
+-          "Params":
+-          {
++          "Params": {
+             "Controller": "memory",
+             "Path": "system"
+           }
+@@ -598,59 +302,107 @@
+       ]
+     }
+   ],
+-
+   "AggregateProfiles": [
+     {
+       "Name": "SCHED_SP_DEFAULT",
+-      "Profiles": [ "TimerSlackNormal" ]
++      "Profiles": [
++        "TimerSlackNormal"
++      ]
+     },
+     {
+       "Name": "SCHED_SP_BACKGROUND",
+-      "Profiles": [ "HighEnergySaving", "LowIoPriority", "TimerSlackHigh" ]
++      "Profiles": [
++        "HighEnergySaving",
++        "LowIoPriority",
++        "TimerSlackHigh"
++      ]
+     },
+     {
+       "Name": "SCHED_SP_FOREGROUND",
+-      "Profiles": [ "HighPerformance", "HighIoPriority", "TimerSlackNormal" ]
++      "Profiles": [
++        "HighPerformance",
++        "HighIoPriority",
++        "TimerSlackNormal"
++      ]
+     },
+     {
+       "Name": "SCHED_SP_TOP_APP",
+-      "Profiles": [ "MaxPerformance", "MaxIoPriority", "TimerSlackNormal" ]
++      "Profiles": [
++        "MaxPerformance",
++        "MaxIoPriority",
++        "TimerSlackNormal"
++      ]
+     },
+     {
+       "Name": "SCHED_SP_SYSTEM",
+-      "Profiles": [ "ServicePerformance", "LowIoPriority", "TimerSlackNormal" ]
++      "Profiles": [
++        "ServicePerformance",
++        "LowIoPriority",
++        "TimerSlackNormal"
++      ]
+     },
+     {
+       "Name": "SCHED_SP_RT_APP",
+-      "Profiles": [ "RealtimePerformance", "MaxIoPriority", "TimerSlackNormal" ]
++      "Profiles": [
++        "RealtimePerformance",
++        "MaxIoPriority",
++        "TimerSlackNormal"
++      ]
+     },
+     {
+       "Name": "CPUSET_SP_DEFAULT",
+-      "Profiles": [ "TimerSlackNormal" ]
++      "Profiles": [
++        "TimerSlackNormal"
++      ]
+     },
+     {
+       "Name": "CPUSET_SP_BACKGROUND",
+-      "Profiles": [ "HighEnergySaving", "ProcessCapacityLow", "LowIoPriority", "TimerSlackHigh" ]
++      "Profiles": [
++        "HighEnergySaving",
++        "ProcessCapacityLow",
++        "LowIoPriority",
++        "TimerSlackHigh"
++      ]
+     },
+     {
+       "Name": "CPUSET_SP_FOREGROUND",
+-      "Profiles": [ "HighPerformance", "ProcessCapacityHigh", "HighIoPriority", "TimerSlackNormal" ]
++      "Profiles": [
++        "HighPerformance",
++        "ProcessCapacityHigh",
++        "HighIoPriority",
++        "TimerSlackNormal"
++      ]
+     },
+     {
+       "Name": "CPUSET_SP_TOP_APP",
+-      "Profiles": [ "MaxPerformance", "ProcessCapacityMax", "MaxIoPriority", "TimerSlackNormal" ]
++      "Profiles": [
++        "MaxPerformance",
++        "ProcessCapacityMax",
++        "MaxIoPriority",
++        "TimerSlackNormal"
++      ]
+     },
+     {
+       "Name": "CPUSET_SP_SYSTEM",
+-      "Profiles": [ "ServiceCapacityLow", "TimerSlackNormal" ]
++      "Profiles": [
++        "ServiceCapacityLow",
++        "TimerSlackNormal"
++      ]
+     },
+     {
+       "Name": "CPUSET_SP_RESTRICTED",
+-      "Profiles": [ "ServiceCapacityRestricted", "TimerSlackNormal" ]
++      "Profiles": [
++        "ServiceCapacityRestricted",
++        "TimerSlackNormal"
++      ]
+     },
+     {
+       "Name": "Dex2OatBootComplete",
+-      "Profiles": [ "Dex2oatPerformance", "LowIoPriority", "TimerSlackHigh" ]
++      "Profiles": [
++        "Dex2oatPerformance",
++        "LowIoPriority",
++        "TimerSlackHigh"
++      ]
+     }
+   ]
+ }
+diff --git a/rootdir/init.rc b/rootdir/init.rc
+index 8a38559..35e3f60 100644
+--- a/rootdir/init.rc
++++ b/rootdir/init.rc
+@@ -127,36 +127,8 @@ on init
+     symlink /proc/self/fd/1 /dev/stdout
+     symlink /proc/self/fd/2 /dev/stderr
+ 
+-    # Create energy-aware scheduler tuning nodes
+-    mkdir /dev/stune/foreground
+-    mkdir /dev/stune/background
+-    mkdir /dev/stune/top-app
+-    mkdir /dev/stune/rt
+-    chown system system /dev/stune
+-    chown system system /dev/stune/foreground
+-    chown system system /dev/stune/background
+-    chown system system /dev/stune/top-app
+-    chown system system /dev/stune/rt
+-    chown system system /dev/stune/tasks
+-    chown system system /dev/stune/foreground/tasks
+-    chown system system /dev/stune/background/tasks
+-    chown system system /dev/stune/top-app/tasks
+-    chown system system /dev/stune/rt/tasks
+-    chown system system /dev/stune/cgroup.procs
+-    chown system system /dev/stune/foreground/cgroup.procs
+-    chown system system /dev/stune/background/cgroup.procs
+-    chown system system /dev/stune/top-app/cgroup.procs
+-    chown system system /dev/stune/rt/cgroup.procs
+-    chmod 0664 /dev/stune/tasks
+-    chmod 0664 /dev/stune/foreground/tasks
+-    chmod 0664 /dev/stune/background/tasks
+-    chmod 0664 /dev/stune/top-app/tasks
+-    chmod 0664 /dev/stune/rt/tasks
+-    chmod 0664 /dev/stune/cgroup.procs
+-    chmod 0664 /dev/stune/foreground/cgroup.procs
+-    chmod 0664 /dev/stune/background/cgroup.procs
+-    chmod 0664 /dev/stune/top-app/cgroup.procs
+-    chmod 0664 /dev/stune/rt/cgroup.procs
++    # /dev/stune (schedtune) no existe en el kernel 3.10 de mocha: borrar el bloque
++    # evita mkdir/chown/chmod fallando en cada arranque
+ 
+     # cpuctl hierarchy for devices using utilclamp
+     mkdir /dev/cpuctl/foreground
+@@ -214,8 +186,7 @@ on init
+     chown system system /dev/cpuctl/nnapi-hal/cgroup.procs
+     chmod 0664 /dev/cpuctl/nnapi-hal/tasks
+     chmod 0664 /dev/cpuctl/nnapi-hal/cgroup.procs
+-    write /dev/cpuctl/nnapi-hal/cpu.uclamp.min 1
+-    write /dev/cpuctl/nnapi-hal/cpu.uclamp.latency_sensitive 1
++    # cpu.uclamp.* no existe en 3.10 (utilclamp llego en 5.3)
+ 
+     # Create a cpu group for camera daemon processes
+     mkdir /dev/cpuctl/camera-daemon
+@@ -243,25 +214,8 @@ on init
+     write /dev/stune/nnapi-hal/schedtune.boost 1
+     write /dev/stune/nnapi-hal/schedtune.prefer_idle 1
+ 
+-    # Create blkio group and apply initial settings.
+-    # This feature needs kernel to support it, and the
+-    # device's init.rc must actually set the correct values.
+-    mkdir /dev/blkio/background
+-    chown system system /dev/blkio
+-    chown system system /dev/blkio/background
+-    chown system system /dev/blkio/tasks
+-    chown system system /dev/blkio/background/tasks
+-    chown system system /dev/blkio/cgroup.procs
+-    chown system system /dev/blkio/background/cgroup.procs
+-    chmod 0664 /dev/blkio/tasks
+-    chmod 0664 /dev/blkio/background/tasks
+-    chmod 0664 /dev/blkio/cgroup.procs
+-    chmod 0664 /dev/blkio/background/cgroup.procs
+-    write /dev/blkio/blkio.weight 1000
+-    write /dev/blkio/background/blkio.weight 200
+-    write /dev/blkio/background/blkio.bfq.weight 10
+-    write /dev/blkio/blkio.group_idle 0
+-    write /dev/blkio/background/blkio.group_idle 0
++    # /dev/blkio: el kernel 3.10 de mocha no compila CONFIG_CGROUP_BLK -> el bloque
++    # completo (mkdir/chown/write blkio.weight...) solo genera errores en el arranque
+ 
+     restorecon_recursive /mnt
+ 
+@@ -359,70 +313,9 @@ on init
+     # /proc/net/fib_trie leaks interface IP addresses
+     chmod 0400 /proc/net/fib_trie
+ 
+-    # sets up initial cpusets for ActivityManager
+-    # this ensures that the cpusets are present and usable, but the device's
+-    # init.rc must actually set the correct cpus
+-    mkdir /dev/cpuset/foreground
+-    copy /dev/cpuset/cpus /dev/cpuset/foreground/cpus
+-    copy /dev/cpuset/mems /dev/cpuset/foreground/mems
+-    mkdir /dev/cpuset/background
+-    copy /dev/cpuset/cpus /dev/cpuset/background/cpus
+-    copy /dev/cpuset/mems /dev/cpuset/background/mems
+-
+-    # system-background is for system tasks that should only run on
+-    # little cores, not on bigs
+-    mkdir /dev/cpuset/system-background
+-    copy /dev/cpuset/cpus /dev/cpuset/system-background/cpus
+-    copy /dev/cpuset/mems /dev/cpuset/system-background/mems
+-
+-    # restricted is for system tasks that are being throttled
+-    # due to screen off.
+-    mkdir /dev/cpuset/restricted
+-    copy /dev/cpuset/cpus /dev/cpuset/restricted/cpus
+-    copy /dev/cpuset/mems /dev/cpuset/restricted/mems
+-
+-    mkdir /dev/cpuset/top-app
+-    copy /dev/cpuset/cpus /dev/cpuset/top-app/cpus
+-    copy /dev/cpuset/mems /dev/cpuset/top-app/mems
+-
+-    # create a cpuset for camera daemon processes
+-    mkdir /dev/cpuset/camera-daemon
+-    copy /dev/cpuset/cpus /dev/cpuset/camera-daemon/cpus
+-    copy /dev/cpuset/mems /dev/cpuset/camera-daemon/mems
+-
+-    # change permissions for all cpusets we'll touch at runtime
+-    chown system system /dev/cpuset
+-    chown system system /dev/cpuset/foreground
+-    chown system system /dev/cpuset/background
+-    chown system system /dev/cpuset/system-background
+-    chown system system /dev/cpuset/top-app
+-    chown system system /dev/cpuset/restricted
+-    chown system system /dev/cpuset/camera-daemon
+-    chown system system /dev/cpuset/tasks
+-    chown system system /dev/cpuset/foreground/tasks
+-    chown system system /dev/cpuset/background/tasks
+-    chown system system /dev/cpuset/system-background/tasks
+-    chown system system /dev/cpuset/top-app/tasks
+-    chown system system /dev/cpuset/restricted/tasks
+-    chown system system /dev/cpuset/camera-daemon/tasks
+-    chown system system /dev/cpuset/cgroup.procs
+-    chown system system /dev/cpuset/foreground/cgroup.procs
+-    chown system system /dev/cpuset/background/cgroup.procs
+-    chown system system /dev/cpuset/system-background/cgroup.procs
+-    chown system system /dev/cpuset/top-app/cgroup.procs
+-    chown system system /dev/cpuset/restricted/cgroup.procs
+-    chown system system /dev/cpuset/camera-daemon/cgroup.procs
+-
+-    # set system-background to 0775 so SurfaceFlinger can touch it
+-    chmod 0775 /dev/cpuset/system-background
+-
+-    chmod 0664 /dev/cpuset/foreground/tasks
+-    chmod 0664 /dev/cpuset/background/tasks
+-    chmod 0664 /dev/cpuset/system-background/tasks
+-    chmod 0664 /dev/cpuset/top-app/tasks
+-    chmod 0664 /dev/cpuset/restricted/tasks
+-    chmod 0664 /dev/cpuset/tasks
+-    chmod 0664 /dev/cpuset/camera-daemon/tasks
++    # /dev/cpuset: sin CONFIG_CPUSETS en 3.10 (el mount falla: 'Failed to mount cpuset
++    # cgroup: No such device', kmod fs-cpuset inexistente). Sin esto, init intenta
++    # copy/mkdir/chown ~40 rutas y libprocessgroup aborta cada JoinCgroup de cpuset.
+     chmod 0664 /dev/cpuset/foreground/cgroup.procs
+     chmod 0664 /dev/cpuset/background/cgroup.procs
+     chmod 0664 /dev/cpuset/system-background/cgroup.procs
+@@ -478,8 +371,7 @@ on init
+     # This is used by Bionic to select optimized routines.
+     write /dev/cpu_variant:${ro.bionic.arch} ${ro.bionic.cpu_variant}
+     chmod 0444 /dev/cpu_variant:${ro.bionic.arch}
+-    write /dev/cpu_variant:${ro.bionic.2nd_arch} ${ro.bionic.2nd_cpu_variant}
+-    chmod 0444 /dev/cpu_variant:${ro.bionic.2nd_arch}
++    # mocha es arm32-only: ro.bionic.2nd_arch no existe y la expansion falla
+ 
+     # Allow system processes to read / write power state.
+     chown system system /sys/power/state

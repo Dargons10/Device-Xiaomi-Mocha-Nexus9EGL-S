@@ -120,7 +120,22 @@ TARGET_LIBINIT_DEFINES_FILE := $(LOCAL_PATH)/libmocha/init_mocha.cpp
 EXTENDED_FONT_FOOTPRINT := true
 
 # Kernel
-BOARD_KERNEL_CMDLINE := vpr_resize androidboot.selinux=permissive vmalloc=400M
+# otg_wakelock.enabled=0: el kernel (CONFIG_USB_OTG_WAKELOCK=y, drivers/usb/phy/otg-wakelock.c)
+# mantiene un wake_lock legacy "vbus-tegra-otg" mientras haya VBUS (cargador u host USB).
+# Ese wake_lock usa __pm_stay_awake() (kernel/power/wakelock.c:218), deja el contador de
+# wakeup events "in progress" != 0 y pm_get_wakeup_count(block=true) (drivers/base/power/wakeup.c)
+# duerme para siempre: ni el HAL android.system.suspend@1.0-service (SystemSuspend.cpp:262 lee
+# /sys/power/wakeup_count antes de escribir /sys/power/state) ni el autosleep del kernel pueden
+# suspender mientras el tablet esta cargando/conectado por USB.
+# Medido en el dispositivo: /sys/kernel/debug/wakeup_sources mostraba
+#   vbus-tegra-otg  active_since=31435754  (distinto de 0; el unico activo)
+# con usb.online=1 y status=Charging; al escribir 0 en
+# /sys/module/otg_wakelock/parameters/enabled el contador de intentos del HAL dejo de
+# bloquearse y el kernel volvio a dormir de verdad (dmesg:
+#   PM: suspend entry ... / Wake39 for irq=52 / Restarting tasks ... done. / PM: suspend exit).
+# Es el knob que el propio driver documenta (MODULE_PARM_DESC(enabled, "enable wakelock when
+# VBUS present")). Si alguna vez hiciera falta revertirlo: quitar este parametro del cmdline.
+BOARD_KERNEL_CMDLINE := vpr_resize androidboot.selinux=permissive vmalloc=400M otg_wakelock.enabled=0
 BOARD_KERNEL_BASE := 0x10000000
 BOARD_RAMDISK_OFFSET := 0x02000000
 BOARD_KERNEL_PAGESIZE := 2048
@@ -173,6 +188,23 @@ TARGET_RELEASETOOLS_EXTENSIONS := device/xiaomi/mocha/releasetools
 MAX_EGL_CACHE_SIZE := 4194304
 MAX_EGL_CACHE_ENTRY_SIZE := 262144
 
+# Root symlinks baked into the (read-only) system image. Consumed by
+# system/core/rootdir/Android.mk as <target>:<link_name>.
+#
+# /gl es OBLIGATORIO para el stack grafico NVIDIA/Tegra: libGLESv2_tegra.so
+# (wrapper) rellena su mesa de funciones "client" en su helper de init haciendo
+# NvOsLibraryLoad("/gl/libEGL_tegra.so") -> NvOsLibraryLoad pasa la literal tal
+# cual a dlopen(). Si ese path no existe, dlopen falla (0x30008), el helper
+# devuelve la mesa SIN poblar y la primera llamada gl* hace blx 0 -> pc=0
+# (nuestro crash "glGetString+20", r0=0x1F03=GL_EXTENSIONS, sin ningun mensaje
+# del driver). Desde Android 10 el root viene de system.img en solo lectura, así
+# que el `symlink /system/lib/egl /gl` de init falla con EROFS y /gl jamas
+# existe: hay que hornearlo en la imagen (mismo mecanismo que el arbol
+# lineage-17.1 de Abobo7, que documenta exactamente esto).
+BOARD_ROOT_EXTRA_SYMLINKS += /system/lib/egl:gl
+# /lbh no aplica en mocha: no existe vendor/lbh en este volcado.
+# /oem ya lo aporta rootdir (directorio en ROOT), no symlink.
+
 # PowerHAL
 TARGET_POWERHAL_VARIANT := tegra
 
@@ -189,11 +221,51 @@ TARGET_DISABLE_POSTRENDER_CLEANUP := true
 
 # SELinux
 SELINUX_IGNORE_NEVERALLOWS := true
-BOARD_SEPOLICY_DIRS += $(LOCAL_PATH)/sepolicy/mocha \
-                       $(LOCAL_PATH)/sepolicy/lineage-common \
-                       $(LOCAL_PATH)/sepolicy/common
+# OJO: en A12 el nombre canónico es BOARD_VENDOR_SEPOLICY_DIRS. BOARD_SEPOLICY_DIRS
+# SOLO se lo pasa a Soong (build/make/core/soong_config.mk:194 lo fusiona con
+# BoardVendorSepolicyDirs), pero la parte Make (system/sepolicy/Android.mk,
+# macro build_vendor_policy -> file_contexts.device.tmp -> file_contexts.bin, que es
+# SELINUX_FC: la etiqueta que usa e2fsdroid al empaquetar system/vendor.img) NO lo
+# ve. Por eso el '/gl u:object_r:rootfs:s0' de sepolicy/mocha/file_contexts entraba
+# en out/.../vendor_file_contexts (Soong) pero no en META/file_contexts.bin, y el
+# packaging abortaba con:
+#   set_selinux_xattr: No such file or directory searching for label "/gl"
+# Trampa adicional: los directorios se descubren con $(wildcard) en tiempo de kati,
+# y kati NO se re-ejecuta si ningún Android.mk/BoardConfig.mk cambió. Al añadir un
+# fichero nuevo de sepolicy hay que tocar un BoardConfig.mk/Android.mk (o makespec
+# clean) para que aparezca en el grafo de ninja.
+# Además: ni con BOARD_SEPOLICY_DIRS ni con BOARD_VENDOR_SEPOLICY_DIRS llegan nuestros
+# directorios al merge Make en este árbol. Comprobado en el ninja generado por kati
+# (out/build-lineage_mocha.ninja): los inputs de file_contexts.bin_intermediates/
+# file_contexts.device.tmp son solo system/sepolicy/vendor/file_contexts y
+# device/lineage/sepolicy/common/vendor/file_contexts (los del hook Lineage de
+# build/make/core/config.mk:1168). Consecuencia: NI '/gl' ni las etiquetas de nuestros
+# binarios custom (/vendor/bin/hw/*-tn8, /dev/tegra-*) estaban llegando nunca a las
+# particiones; solo la política runtime de Soong los veía.
+# Canales que SÍ funcionan (usados ya):
+#   1) LOCAL_FILE_CONTEXTS en un modulo de PRODUCT_PACKAGES ->
+#      ALL_MODULES.<m>.FILE_CONTEXTS -> file_contexts.modules.tmp
+#      (build/make/core/Makefile:1601) -> file_contexts.bin = SELINUX_FC (:1606).
+#      Lo usa initfiles/Android.mk con sepolicy/mocha/root_file_contexts para '/gl'.
+#   2) Las etiquetas de los modulos Soong con `file_contexts:` también acaban ahí.
+# TODO F4 (sepolicy enforcing): reorganizar sepolicy/common/{public,private,vendor} y
+# sepolicy/lineage/{private,vendor} a las variables canónicas de A12
+# (BOARD_VENDOR_SEPOLICY_DIRS / BOARD_PLAT_PUBLIC_SEPOLICY_DIR /
+#  BOARD_PLAT_PRIVATE_SEPOLICY_DIR o SYSTEM_EXT_*), y verificar con
+# 'strings out/target/product/mocha/obj/ETC/file_contexts.bin_intermediates/file_contexts.bin'
+# que las rutas del device aparecen en la etiqueta de las particiones.
+# Se usan rutas literales (no $(LOCAL_PATH)) por coherencia con Lineage/Abobo7: en el
+# parseo Make del BoardConfig LOCAL_PATH no está garantizado.
+BOARD_VENDOR_SEPOLICY_DIRS += \
+    device/xiaomi/mocha/sepolicy/mocha \
+    device/xiaomi/mocha/sepolicy/lineage-common \
+    device/xiaomi/mocha/sepolicy/common
                       
 # SHIMS
+# OJO: en Android 12 TARGET_LD_SHIM_LIBS NO se consume (build/make y system/linkerconfig
+# ya no lo leen; /linkerconfig/ld.config.txt no lleva entradas shim). El mecanismo real
+# es LD_PRELOAD: ver initfiles/init.nvgpu_shims.rc y patches/system/core/0001-*.rc.
+# Se mantienen las entradas como referencia/para recovery y builds antiguos.
 TARGET_LD_SHIM_LIBS := \
     /system/vendor/lib/libnvomxadaptor.so|libmocha_omx.so \
     /system/lib/hw/camera.vendor.tegra.so|libmocha_camera.so \

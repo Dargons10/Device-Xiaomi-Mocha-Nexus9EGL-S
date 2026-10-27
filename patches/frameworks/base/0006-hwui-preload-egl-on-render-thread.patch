@@ -1,0 +1,32 @@
+From: mocha port <local>
+Subject: [PATCH 0006] hwui: preload EGL on the RenderThread instead of a detached thread
+
+Taken from the validated r15 work on the Abobo7 lineage-17.1 tree ("EGL preload
+lifetime repairs"). RenderProxy already posts preload() to the RenderThread, so
+spawning a detached thread for eglGetDisplay(EGL_DEFAULT_DISPLAY) only creates a
+race: the stock Tegra 334.00 EGL driver keeps display/client state in library
+globals, and the short-lived thread's exit (implicit eglReleaseThread) can tear
+that state down while the RenderThread is in the middle of its first
+eglGetDisplay()/eglInitialize(). Do the preload inline.
+---
+diff --git a/libs/hwui/renderthread/RenderThread.cpp b/libs/hwui/renderthread/RenderThread.cpp
+index f83c0a4926f9..c3c3f7cc9736 100644
+--- a/libs/hwui/renderthread/RenderThread.cpp
++++ b/libs/hwui/renderthread/RenderThread.cpp
+@@ -477,8 +477,14 @@ bool RenderThread::isCurrent() {
+ void RenderThread::preload() {
+     // EGL driver is always preloaded only if HWUI renders with GL.
+     if (Properties::getRenderPipelineType() == RenderPipelineType::SkiaGL) {
+-        std::thread eglInitThread([]() { eglGetDisplay(EGL_DEFAULT_DISPLAY); });
+-        eglInitThread.detach();
++        // preload() ya se envia por RenderProxy a ESTE hilo. Los drivers EGL
++        // legacy (Tegra 334.00) guardan el estado de display/global por proceso
++        // dentro de la propia libreria: un hilo suelto de preload llama a
++        // eglGetDisplay() en paralelo con el eglGetDisplay()/eglInitialize() del
++        // primer frame y, al terminar, puede derribar ese estado compartido
++        // (eglReleaseThread implicito en el exit de hilo). Hacerlo inline evita la
++        // carrera en la primera frame.
++        eglGetDisplay(EGL_DEFAULT_DISPLAY);
+     } else {
+         requireVkContext();
+     }

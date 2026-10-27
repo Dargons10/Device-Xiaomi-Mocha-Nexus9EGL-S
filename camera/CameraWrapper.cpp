@@ -20,6 +20,10 @@
 
 #define LOG_TAG "CameraWrapper"
 #include <cutils/log.h>
+
+#include <dlfcn.h>
+#include <unistd.h>
+
 #include "CameraWrapper.h"
 #include "Camera3Wrapper.h"
 
@@ -764,6 +768,74 @@ static bool force_legacy_request_limits(camera_metadata_t** metadata_ptr, int ca
     return true;
 }
 
+/*
+ * Descubrimiento de sensores del stack de cámara NVIDIA stock (puerto de
+ * Abobo7 lineage-17.1, android_device_xiaomi_mocha/camera/CameraWrapper.cpp).
+ *
+ * El blob vendor (libnvmm_camera + /etc/nvcamera.conf) identifica los sensores
+ * por los nodos misc /dev/imx179 y /dev/ov5693. Esos nodos los crea
+ * misc_register() en kernel/.../drivers/media/platform/tegra/{imx179,ov5693}.c
+ * sólo cuando pcl-generic instancia el módulo
+ * (camera_probe -> camera_add_drivers -> camera_i2c_probe), y eso ocurre sólo
+ * si alguien abre /dev/camera.pcl y emite los ioctls NVC.
+ * libnvodm_imager.so (vendor/lib/libnvodm_imager.so, instalada por
+ * vendor/xiaomi/mocha/mocha-vendor.mk) es quien hace esa apertura: sin este
+ * paso el vendor HAL enumera 0 cámaras (F8) aunque el kernel tenga el stack.
+ *
+ * El handle se mantiene vivo a propósito: la librería deja tablas internas de
+ * dispositivos detectados que el HAL reutiliza en NvOdmImagerCreate2().
+ */
+static void *gImagerHandle = nullptr;
+
+static bool sensor_nodes_ready()
+{
+    if (access("/dev/imx179", R_OK | W_OK) != 0)
+        return false;
+    /* ov5693.c usa pdata->dev_name y puede añadir ".<num>" al nombre */
+    return access("/dev/ov5693", R_OK | W_OK) == 0 ||
+           access("/dev/ov5693.0", R_OK | W_OK) == 0;
+}
+
+static void prepareImagerDevices()
+{
+    static bool attempted = false;
+    if (attempted)
+        return;
+    attempted = true;
+
+    void *imager = dlopen("libnvodm_imager.so", RTLD_NOW | RTLD_LOCAL);
+    if (!imager) {
+        ALOGE("%s: dlopen(libnvodm_imager.so) falló: %s",
+                __FUNCTION__, dlerror());
+        return;
+    }
+    gImagerHandle = imager;   /* no se cierra: conserva el estado del detect */
+
+    typedef int (*imager_init_fn)();
+    typedef int (*imager_detect_fn)();
+    imager_init_fn detInit = (imager_init_fn)dlsym(imager, "NvOdmImagerDetInit");
+    imager_detect_fn detect =
+            (imager_detect_fn)dlsym(imager, "NvOdmImagerDeviceDetect");
+    if (!detInit || !detect) {
+        ALOGE("%s: faltan símbolos imager (DetInit=%p Detect=%p)",
+                __FUNCTION__, detInit, detect);
+        return;
+    }
+
+    detInit();
+    detect();
+
+    for (int i = 0; i < 100; i++) {
+        if (sensor_nodes_ready()) {
+            ALOGD("%s: nodos de sensor listos (imager=%p)",
+                    __FUNCTION__, gImagerHandle);
+            return;
+        }
+        usleep(20000);   /* 2 s en total: el probe I2C + misc_register es lento */
+    }
+    ALOGE("%s: timeout esperando /dev/imx179 y /dev/ov5693", __FUNCTION__);
+}
+
 static int check_vendor_module()
 {
     int rv = 0;
@@ -771,6 +843,8 @@ static int check_vendor_module()
 
     if(gVendorModule)
         return 0;
+
+    prepareImagerDevices();
 
     rv = hw_get_module_by_class("camera", "vendor", (const hw_module_t **)&gVendorModule);
     if (rv)

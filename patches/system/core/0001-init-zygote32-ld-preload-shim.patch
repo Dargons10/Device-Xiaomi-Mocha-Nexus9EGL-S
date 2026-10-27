@@ -1,12 +1,12 @@
 diff --git a/rootdir/init.zygote32.rc b/rootdir/init.zygote32.rc
-index e827cf557..9411d8bd9 100644
+index 9469a4873..09d1b13f8 100644
 --- a/rootdir/init.zygote32.rc
 +++ b/rootdir/init.zygote32.rc
 @@ -5,6 +5,7 @@ service zygote /system/bin/app_process -Xzygote /system/bin --zygote --start-sys
      group root readproc reserved_disk
      socket zygote stream 660 root system
      socket usap_pool_primary stream 660 root system
-+    setenv LD_PRELOAD /system/lib/libshim_zw.so
++    setenv LD_PRELOAD /system/lib/libshim_zw.so:/vendor/lib/libshim_atomic.so
      onrestart exec_background - system system -- /system/bin/vdc volume abort_fuse
      onrestart write /sys/power/state on
      onrestart restart audioserver

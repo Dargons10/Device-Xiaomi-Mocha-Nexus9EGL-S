@@ -40,6 +40,12 @@ struct Light : public ILight {
     Return<void> getSupportedTypes(getSupportedTypes_cb _hidl_cb) override;
 
   private:
+    // Escrita sysfs con doble guarda:
+    //  - sólo escribe si el valor cambia (los nodos lp5521/leds son transacciones I2C)
+    //  - no intenta escribir streams que no se pudieron abrir (run_engine/select_engine
+    //    dependen del driver lp5521 y pueden no existir)
+    void writeSysfsLocked(std::ofstream& stream, int value, int& lastWritten);
+
     void setAttentionLight(const LightState& state);
     void setBatteryLight(const LightState& state);
     void setButtonsBacklight(const LightState& state);
@@ -55,6 +61,13 @@ struct Light : public ILight {
     std::ofstream mBlueLed;
     std::ofstream mLedSelectEngine;
     std::ofstream mLedRunEngine;
+
+    // Ultimo valor escrito en cada nodo (-1 = todavia no escrito)
+    int mLastRedLed = -1;
+    int mLastGreenLed = -1;
+    int mLastBlueLed = -1;
+    int mLastLedSelect = -1;
+    int mLastLedRun = -1;
 
     LightState mAttentionState;
     LightState mBatteryState;

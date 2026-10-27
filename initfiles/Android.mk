@@ -77,6 +77,13 @@ LOCAL_MODULE_CLASS := ETC
 LOCAL_SRC_FILES    := init.tn8_common.rc
 LOCAL_VENDOR_MODULE := true
 LOCAL_MODULE_RELATIVE_PATH := init/hw
+# Vehiculo para meter etiquetas de la RAIZ (/gl) en el file_contexts.bin que usa
+# e2fsdroid: LOCAL_FILE_CONTEXTS -> ALL_MODULES.<m>.FILE_CONTEXTS ->
+# file_contexts.modules.tmp (build/make/core/Makefile:1601) -> file_contexts.bin
+# (SELINUX_FC, build/make/core/Makefile:1606). Es el unico canal del device que la
+# via Make del sepolicy garantiza en este arbol; ver BoardConfig.mk y
+# sepolicy/mocha/root_file_contexts.
+LOCAL_FILE_CONTEXTS := $(LOCAL_PATH)/../sepolicy/mocha/root_file_contexts
 include $(BUILD_PREBUILT)
 
 #include $(CLEAR_VARS)

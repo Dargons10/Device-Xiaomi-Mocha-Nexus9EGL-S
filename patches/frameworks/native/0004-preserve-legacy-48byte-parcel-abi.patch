@@ -1,0 +1,310 @@
+diff --git a/libs/binder/Parcel.cpp b/libs/binder/Parcel.cpp
+index 9c5466635e..5a86819837 100644
+--- a/libs/binder/Parcel.cpp
++++ b/libs/binder/Parcel.cpp
+@@ -36,6 +36,7 @@
+ #include <binder/IPCThreadState.h>
+ #include <binder/Parcel.h>
+ #include <binder/ProcessState.h>
++#include <binder/RpcSession.h>
+ #include <binder/Stability.h>
+ #include <binder/Status.h>
+ #include <binder/TextOutput.h>
+@@ -77,11 +78,27 @@ static size_t pad_size(size_t s) {
+ 
+ namespace android {
+ 
++// mocha: newer Parcel bookkeeping lives here so that the object itself keeps the
++// 48-byte layout that the stock 32-bit NVIDIA/Tegra clients assume.
++struct Parcel::ParcelState {
++    size_t mOpenAshmemSize = 0;
++    mutable sp<RpcSession> mSession;
++    size_t mWorkSourceRequestHeaderPosition = 0;
++    bool mRequestHeaderPresent = false;
++    mutable bool mDeallocZero = false;
++};
++
+ // many things compile this into prebuilts on the stack
+ #ifdef __LP64__
+-static_assert(sizeof(Parcel) == 120);
++// 64-bit/host builds never ship the stock-blob compatibility layout; only a
++// sanity floor is enforced there (host tools such as linux_glibc libbinder do
++// not have a fixed ABI requirement).
++static_assert(sizeof(Parcel) >= 48);
+ #else
+-static_assert(sizeof(Parcel) == 60);
++// Stock mocha blobs (libnvcpl.so, libnvremoteprotocol.so, libnvaudioservice.so, ...)
++// construct android::Parcel inside stack frames sized for exactly 48 bytes; a 60-byte
++// Parcel overflows them by 12 bytes and overwrites their saved r4/r5/r6 slots.
++static_assert(sizeof(Parcel) == 48, "stock NVIDIA/Tegra clients allocate 48-byte Parcels");
+ #endif
+ 
+ static std::atomic<size_t> gParcelGlobalAllocCount;
+@@ -202,7 +219,7 @@ status_t Parcel::flattenBinder(const sp<IBinder>& binder)
+             status_t status = writeInt32(1); // non-null
+             if (status != OK) return status;
+             RpcAddress address = RpcAddress::zero();
+-            status = mSession->state()->onBinderLeaving(mSession, binder, &address);
++            status = mState->mSession->state()->onBinderLeaving(mState->mSession, binder, &address);
+             if (status != OK) return status;
+             status = address.writeToParcel(this);
+             if (status != OK) return status;
+@@ -273,7 +290,7 @@ status_t Parcel::flattenBinder(const sp<IBinder>& binder)
+ status_t Parcel::unflattenBinder(sp<IBinder>* out) const
+ {
+     if (isForRpc()) {
+-        LOG_ALWAYS_FATAL_IF(mSession == nullptr, "RpcSession required to read from remote parcel");
++        LOG_ALWAYS_FATAL_IF(mState->mSession == nullptr, "RpcSession required to read from remote parcel");
+ 
+         int32_t isNull;
+         status_t status = readInt32(&isNull);
+@@ -285,7 +302,7 @@ status_t Parcel::unflattenBinder(sp<IBinder>* out) const
+             auto addr = RpcAddress::zero();
+             status_t status = addr.readFromParcel(*this);
+             if (status != OK) return status;
+-            binder = mSession->state()->onBinderEntering(mSession, addr);
++            binder = mState->mSession->state()->onBinderEntering(mState->mSession, addr);
+         }
+ 
+         return finishUnflattenBinder(binder, out);
+@@ -312,7 +329,7 @@ status_t Parcel::unflattenBinder(sp<IBinder>* out) const
+ 
+ // ---------------------------------------------------------------------------
+ 
+-Parcel::Parcel()
++Parcel::Parcel() : mState(new ParcelState)
+ {
+     LOG_ALLOC("Parcel %p: constructing", this);
+     initState();
+@@ -321,6 +338,8 @@ Parcel::Parcel()
+ Parcel::~Parcel()
+ {
+     freeDataNoInit();
++    delete mState;
++    mState = nullptr;
+     LOG_ALLOC("Parcel %p: destroyed", this);
+ }
+ 
+@@ -504,7 +523,7 @@ status_t Parcel::appendFrom(const Parcel *parcel, size_t offset, size_t len)
+ 
+             flat_binder_object* flat
+                 = reinterpret_cast<flat_binder_object*>(mData + off);
+-            acquire_object(proc, *flat, this, &mOpenAshmemSize);
++            acquire_object(proc, *flat, this, &mState->mOpenAshmemSize);
+ 
+             if (flat->hdr.type == BINDER_TYPE_FD) {
+                 // If this is a file descriptor, we need to dup it so the
+@@ -560,7 +579,7 @@ bool Parcel::hasFileDescriptors() const
+ 
+ void Parcel::markSensitive() const
+ {
+-    mDeallocZero = true;
++    mState->mDeallocZero = true;
+ }
+ 
+ void Parcel::markForBinder(const sp<IBinder>& binder) {
+@@ -576,19 +595,19 @@ void Parcel::markForRpc(const sp<RpcSession>& session) {
+                         "format must be set before data is written OR on IPC data");
+ 
+     LOG_ALWAYS_FATAL_IF(session == nullptr, "markForRpc requires session");
+-    mSession = session;
++    mState->mSession = session;
+ }
+ 
+ bool Parcel::isForRpc() const {
+-    return mSession != nullptr;
++    return mState->mSession != nullptr;
+ }
+ 
+ void Parcel::updateWorkSourceRequestHeaderPosition() const {
+     // Only update the request headers once. We only want to point
+     // to the first headers read/written.
+-    if (!mRequestHeaderPresent) {
+-        mWorkSourceRequestHeaderPosition = dataPosition();
+-        mRequestHeaderPresent = true;
++    if (!mState->mRequestHeaderPresent) {
++        mState->mWorkSourceRequestHeaderPosition = dataPosition();
++        mState->mRequestHeaderPresent = true;
+     }
+ }
+ 
+@@ -620,12 +639,12 @@ status_t Parcel::writeInterfaceToken(const char16_t* str, size_t len) {
+ 
+ bool Parcel::replaceCallingWorkSourceUid(uid_t uid)
+ {
+-    if (!mRequestHeaderPresent) {
++    if (!mState->mRequestHeaderPresent) {
+         return false;
+     }
+ 
+     const size_t initialPosition = dataPosition();
+-    setDataPosition(mWorkSourceRequestHeaderPosition);
++    setDataPosition(mState->mWorkSourceRequestHeaderPosition);
+     status_t err = writeInt32(uid);
+     setDataPosition(initialPosition);
+     return err == NO_ERROR;
+@@ -633,12 +652,12 @@ bool Parcel::replaceCallingWorkSourceUid(uid_t uid)
+ 
+ uid_t Parcel::readCallingWorkSourceUid() const
+ {
+-    if (!mRequestHeaderPresent) {
++    if (!mState->mRequestHeaderPresent) {
+         return IPCThreadState::kUnsetWorkSource;
+     }
+ 
+     const size_t initialPosition = dataPosition();
+-    setDataPosition(mWorkSourceRequestHeaderPosition);
++    setDataPosition(mState->mWorkSourceRequestHeaderPosition);
+     uid_t uid = readInt32();
+     setDataPosition(initialPosition);
+     return uid;
+@@ -1335,7 +1354,7 @@ restart_write:
+         // Need to write meta-data?
+         if (nullMetaData || val.binder != 0) {
+             mObjects[mObjectsSize] = mDataPos;
+-            acquire_object(ProcessState::self(), val, this, &mOpenAshmemSize);
++            acquire_object(ProcessState::self(), val, this, &mState->mOpenAshmemSize);
+             mObjectsSize++;
+         }
+ 
+@@ -2212,7 +2231,7 @@ void Parcel::releaseObjects()
+         i--;
+         const flat_binder_object* flat
+             = reinterpret_cast<flat_binder_object*>(data+objects[i]);
+-        release_object(proc, *flat, this, &mOpenAshmemSize);
++        release_object(proc, *flat, this, &mState->mOpenAshmemSize);
+     }
+ }
+ 
+@@ -2229,7 +2248,7 @@ void Parcel::acquireObjects()
+         i--;
+         const flat_binder_object* flat
+             = reinterpret_cast<flat_binder_object*>(data+objects[i]);
+-        acquire_object(proc, *flat, this, &mOpenAshmemSize);
++        acquire_object(proc, *flat, this, &mState->mOpenAshmemSize);
+     }
+ }
+ 
+@@ -2253,7 +2272,7 @@ void Parcel::freeDataNoInit()
+             LOG_ALLOC("Parcel %p: freeing with %zu capacity", this, mDataCapacity);
+             gParcelGlobalAllocSize -= mDataCapacity;
+             gParcelGlobalAllocCount--;
+-            if (mDeallocZero) {
++            if (mState->mDeallocZero) {
+                 zeroMemory(mData, mDataSize);
+             }
+             free(mData);
+@@ -2314,7 +2333,7 @@ status_t Parcel::restartWrite(size_t desired)
+         return continueWrite(desired);
+     }
+ 
+-    uint8_t* data = reallocZeroFree(mData, mDataCapacity, desired, mDeallocZero);
++    uint8_t* data = reallocZeroFree(mData, mDataCapacity, desired, mState->mDeallocZero);
+     if (!data && desired > mDataCapacity) {
+         mError = NO_MEMORY;
+         return NO_MEMORY;
+@@ -2454,7 +2473,7 @@ status_t Parcel::continueWrite(size_t desired)
+                     // will need to rescan because we may have lopped off the only FDs
+                     mFdsKnown = false;
+                 }
+-                release_object(proc, *flat, this, &mOpenAshmemSize);
++                release_object(proc, *flat, this, &mState->mOpenAshmemSize);
+             }
+ 
+             if (objectsSize == 0) {
+@@ -2476,7 +2495,7 @@ status_t Parcel::continueWrite(size_t desired)
+ 
+         // We own the data, so we can just do a realloc().
+         if (desired > mDataCapacity) {
+-            uint8_t* data = reallocZeroFree(mData, mDataCapacity, desired, mDeallocZero);
++            uint8_t* data = reallocZeroFree(mData, mDataCapacity, desired, mState->mDeallocZero);
+             if (data) {
+                 LOG_ALLOC("Parcel %p: continue from %zu to %zu capacity", this, mDataCapacity,
+                         desired);
+@@ -2536,7 +2555,7 @@ void Parcel::initState()
+     mDataPos = 0;
+     ALOGV("initState Setting data size of %p to %zu", this, mDataSize);
+     ALOGV("initState Setting data pos of %p to %zu", this, mDataPos);
+-    mSession = nullptr;
++    mState->mSession = nullptr;
+     mObjects = nullptr;
+     mObjectsSize = 0;
+     mObjectsCapacity = 0;
+@@ -2545,11 +2564,11 @@ void Parcel::initState()
+     mHasFds = false;
+     mFdsKnown = true;
+     mAllowFds = true;
+-    mDeallocZero = false;
++    mState->mDeallocZero = false;
+     mOwner = nullptr;
+-    mOpenAshmemSize = 0;
+-    mWorkSourceRequestHeaderPosition = 0;
+-    mRequestHeaderPresent = false;
++    mState->mOpenAshmemSize = 0;
++    mState->mWorkSourceRequestHeaderPosition = 0;
++    mState->mRequestHeaderPresent = false;
+ 
+     // racing multiple init leads only to multiple identical write
+     if (gMaxFds == 0) {
+@@ -2584,12 +2603,12 @@ size_t Parcel::getBlobAshmemSize() const
+     // This used to return the size of all blobs that were written to ashmem, now we're returning
+     // the ashmem currently referenced by this Parcel, which should be equivalent.
+     // TODO: Remove method once ABI can be changed.
+-    return mOpenAshmemSize;
++    return mState->mOpenAshmemSize;
+ }
+ 
+ size_t Parcel::getOpenAshmemSize() const
+ {
+-    return mOpenAshmemSize;
++    return mState->mOpenAshmemSize;
+ }
+ 
+ // --- Parcel::Blob ---
+diff --git a/libs/binder/include/binder/Parcel.h b/libs/binder/include/binder/Parcel.h
+index ef8014367e..2f5faa8287 100644
+--- a/libs/binder/include/binder/Parcel.h
++++ b/libs/binder/include/binder/Parcel.h
+@@ -1125,21 +1125,23 @@ private:
+     mutable size_t      mNextObjectHint;
+     mutable bool        mObjectsSorted;
+ 
+-    mutable bool        mRequestHeaderPresent;
+-
+-    mutable size_t      mWorkSourceRequestHeaderPosition;
+-
+     mutable bool        mFdsKnown;
+     mutable bool        mHasFds;
+     bool                mAllowFds;
+ 
+-    // if this parcelable is involved in a secure transaction, force the
+-    // data to be overridden with zero when deallocated
+-    mutable bool        mDeallocZero;
+-
+     release_func        mOwner;
+ 
+-    sp<RpcSession> mSession;
++    // mocha: stock 32-bit NVIDIA/Tegra clients (libnvcpl, libnvremoteprotocol,
++    // libnvaudioservice, libnvcapaudioservice, ...) reserve exactly 48 bytes when
++    // they allocate an android::Parcel on the stack. A larger Parcel makes their
++    // Parcel constructor write past the end of their own stack frame and destroy
++    // the saved callee-saved registers (r4/r5/r6) of *their* callers, which here
++    // are libEGL_tegra_impl.so and hwcomposer.tegra.so - that is the source of
++    // the SIGSEGV null dereferences at libEGL_tegra_impl+0x11d06 / +0x11dc2.
++    // Newer bookkeeping therefore lives in heap state so that sizeof(Parcel)
++    // stays 48 bytes on ARM32. See patches/frameworks/native/0004-*.patch.
++    struct ParcelState;
++    ParcelState*        mState;
+ 
+     class Blob {
+     public:
+@@ -1224,9 +1226,6 @@ public:
+         inline void* data() { return mData; }
+     };
+ 
+-private:
+-    size_t mOpenAshmemSize;
+-
+ public:
+     // TODO: Remove once ABI can be changed.
+     size_t getBlobAshmemSize() const;

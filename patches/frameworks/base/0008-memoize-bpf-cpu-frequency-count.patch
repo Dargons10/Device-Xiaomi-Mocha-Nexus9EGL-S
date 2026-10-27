@@ -1,0 +1,48 @@
+diff --git a/core/jni/com_android_internal_os_KernelSingleProcessCpuThreadReader.cpp b/core/jni/com_android_internal_os_KernelSingleProcessCpuThreadReader.cpp
+index dfae68429f6d..fcad56eca1b3 100644
+--- a/core/jni/com_android_internal_os_KernelSingleProcessCpuThreadReader.cpp
++++ b/core/jni/com_android_internal_os_KernelSingleProcessCpuThreadReader.cpp
+@@ -21,6 +21,8 @@
+ 
+ #include <android-base/file.h>
+ #include <android-base/parseint.h>
++#include <optional>
++#include <vector>
+ #include <android-base/stringprintf.h>
+ #include <android-base/strings.h>
+ #include <android_runtime/Log.h>
+@@ -69,16 +71,25 @@ public:
+ class BpfCpuTimeInStateReader : public ICpuTimeInStateReader {
+ public:
+     size_t getCpuFrequencyCount() {
+-        std::optional<std::vector<std::vector<uint32_t>>> cpuFreqs = android::bpf::getCpuFreqs();
+-        if (!cpuFreqs) {
+-            ALOGE("Cannot obtain CPU frequency count");
+-            return 0;
+-        }
++        // Memoizado: la tabla de frecuencias no cambia en la vida del proceso, y en un
++        // kernel sin BPF (mocha: 3.10, sin bpffs; /sys/fs/bpf no existe) el intento
++        // fallaba SIEMPRE. Como KernelSingleProcessCpuThreadReader se instancia por
++        // proceso monitorizado (BatteryStats), el fallo se repetia: 265 registros de
++        // "Cannot obtain CPU frequency count" en las 7h26m de log analizado.
++        static const size_t freqCount = []() -> size_t {
++            std::optional<std::vector<std::vector<uint32_t>>> cpuFreqs = android::bpf::getCpuFreqs();
++            if (!cpuFreqs) {
++                ALOGW("CPU time-in-state (BPF) no disponible en este kernel; stats de "
++                      "frecuencia CPU por proceso deshabilitadas");
++                return size_t{0};
++            }
+ 
+-        size_t freqCount = 0;
+-        for (auto cluster : *cpuFreqs) {
+-            freqCount += cluster.size();
+-        }
++            size_t count = 0;
++            for (auto cluster : *cpuFreqs) {
++                count += cluster.size();
++            }
++            return count;
++        }();
+ 
+         return freqCount;
+     }
