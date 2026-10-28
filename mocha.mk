@@ -83,6 +83,7 @@ PRODUCT_PACKAGES += \
     camera.mocha \
     libmocha_camera \
     libmocha_sensor_shim \
+    libmocha_cpp_shim \
     libpowerservice_client \
     libshim_camera \
     libFaceProc
