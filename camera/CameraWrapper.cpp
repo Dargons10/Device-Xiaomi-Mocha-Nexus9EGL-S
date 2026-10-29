@@ -23,6 +23,9 @@
 
 #include <dlfcn.h>
 #include <unistd.h>
+#include <string.h>
+#include <time.h>
+#include <stdlib.h>
 
 #include "CameraWrapper.h"
 #include "Camera3Wrapper.h"
@@ -32,14 +35,70 @@
 static int pfd[2];
 static pthread_t thr;
 
+/*
+ * Limitador de registro del depurado del HAL (2026-10-28).
+ * El HAL NVIDIA (libnvmm_camera.so / camera.vendor.tegra.so) escribe su depuracion
+ * a stderr, y este hook la reenvia a logcat. Cuando el HAL se queda esperando un
+ * syncpt de VI que nunca senializa, emite ~15.000 lineas por segundo:
+ *   medido en camara.log: 842.513 lineas identicas "Waiting on the syncpt semaphore
+ *   failed 0x2" en 55 s (88 % del log), de las cuales 426.862 eran de este hook.
+ * Consecuencias reales medidas:
+ *   1) CPU/bateria: el provider consumo 9.689 + 19.405 jiffies (user+sys) en ~5 min,
+ *      con la bateria al 0 % y voltaje cayendo 3,49 -> 3,09 V (descarga acelerada).
+ *   2) Ceguera: logd hizo pruning ('Skipping entries from slow reader, pid 5179') y
+ *      se perdio el mensaje distintivo del HAL que explica el fallo del syncpt.
+ * Deduplicamos lineas consecutivas identicas y resumimos una vez por segundo,
+ * con un techo duro de lineas distintas por segundo.
+ */
+#define CAM_LOG_MAX_PER_SEC 200
+
 static void *thread_func(void*)
 {
     ssize_t rdsz;
-    char buf[128];
+    char buf[512];
+    static char last[512];
+    static unsigned repeats;
+    static struct timespec t_last;
+    static unsigned emitted;
+
     while((rdsz = read(pfd[0], buf, sizeof buf - 1)) > 0) {
         if(buf[rdsz - 1] == '\n') --rdsz;
         buf[rdsz] = 0;  /* add null-terminator */
-        __android_log_write(ANDROID_LOG_DEBUG, LOG_TAG, buf);
+
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (now.tv_sec != t_last.tv_sec) {
+            if (repeats) {
+                __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG,
+                                    "[limite] linea anterior repetida %u veces", repeats);
+                repeats = 0;
+            }
+            if (emitted >= CAM_LOG_MAX_PER_SEC) {
+                __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG,
+                                    "[limite] %u lineas mas descartadas en el segundo",
+                                    emitted - CAM_LOG_MAX_PER_SEC);
+            }
+            emitted = 0;
+            t_last = now;
+        }
+
+        if (strcmp(buf, last) == 0) {
+            repeats++;
+            emitted++;
+            continue;
+        }
+
+        if (repeats) {
+            __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG,
+                                "[limite] linea anterior repetida %u veces", repeats);
+            repeats = 0;
+        }
+
+        if (emitted < CAM_LOG_MAX_PER_SEC) {
+            __android_log_write(ANDROID_LOG_DEBUG, LOG_TAG, buf);
+        }
+        emitted++;
+        snprintf(last, sizeof last, "%s", buf);
     }
     return 0;
 }
@@ -442,6 +501,85 @@ static bool ensure_stream_configurations(camera_metadata_t** metadata_ptr, int c
 
     metadata = *metadata_ptr;
     return has_valid_stream_configurations(metadata, camera_id, "synthesized");
+}
+
+/*
+ * ANDROID_JPEG_MAX_SIZE (2026-10-28): A12 exige esta etiqueta a CUALQUIER HAL camera3.
+ * Camera3Device::getJpegBufferSize (frameworks/av/services/camera/libcameraservice/
+ * device3/Camera3Device.cpp:610-660) la busca sin alternativa posible:
+ *   count == 0  ->  BAD_VALUE  ->  'Camera 0: createStream: Invalid jpeg buffer size -22'
+ *   -> 'Session 0: Failed to create capture session; configuration failed'
+ *   -> 'CAM_CaptureModule: Could not set up preview.'   (medido 20:23:31.042)
+ * El HAL de referencia que AOSP trae para A12 la publica y comprueba el minimo:
+ *   hardware/interfaces/camera/device/3.4/default/ExternalCameraDevice.cpp:361
+ *   hardware/interfaces/camera/device/3.4/default/ExternalCameraDeviceSession.cpp:1208-1222
+ * Minimo: Camera3Device.h:321 -> kMinJpegBufferSize = 256*1024 + sizeof(camera_jpeg_blob_t),
+ * y Camera3Device.cpp:650 lo comprueba con assert(kMinJpegBufferSize < maxJpegBufferSize):
+ * tiene que ser ESTRICTAMENTE mayor o cameraserver aborta.
+ * Formula: 2 bytes/pixel sobre la mayor talla de captura, suelo 1 MiB, techo 64 MiB.
+ *   imx179 1920x1080  -> 4.147.200 B    |    ov5693 2592x1944 -> 10.077.696 B
+ */
+static bool force_jpeg_max_size(camera_metadata_t** metadata_ptr, int camera_id)
+{
+    camera_metadata_t* metadata = *metadata_ptr;
+    if (metadata == NULL) {
+        return false;
+    }
+
+    static const int32_t kMinJpegBuf = 256 * 1024 + 8;   /* camera_jpeg_blob_t: 2 x uint32 */
+
+    camera_metadata_entry_t existing;
+    if (find_camera_metadata_entry(metadata, ANDROID_JPEG_MAX_SIZE, &existing) == 0) {
+        if (existing.count >= 1 && existing.data.i32[0] > kMinJpegBuf) {
+            ALOGI("%s: camera %d JPEG_MAX_SIZE ya valido en el blob: %d",
+                  __FUNCTION__, camera_id, existing.data.i32[0]);
+            return true;
+        }
+    }
+
+    int32_t best_w = 0, best_h = 0;
+    camera_metadata_entry_t sizes;
+    const uint32_t size_tags[] = { ANDROID_SCALER_AVAILABLE_JPEG_SIZES,
+                                   ANDROID_SCALER_AVAILABLE_PROCESSED_SIZES };
+    for (size_t t = 0; t < sizeof(size_tags)/sizeof(size_tags[0]); t++) {
+        if (best_w > 0) break;
+        if (find_camera_metadata_entry(metadata, size_tags[t], &sizes) != 0)
+            continue;
+        if ((sizes.count % 2) != 0)
+            continue;
+        for (size_t i = 0; i + 1 < sizes.count; i += 2) {
+            int32_t w = sizes.data.i32[i];
+            int32_t h = sizes.data.i32[i + 1];
+            if (w <= 0 || h <= 0)
+                continue;
+            if ((int64_t)w * h > (int64_t)best_w * best_h) {
+                best_w = w;
+                best_h = h;
+            }
+        }
+    }
+    if (best_w <= 0 && find_camera_metadata_entry(metadata,
+            ANDROID_SENSOR_INFO_ACTIVE_ARRAY_SIZE, &sizes) == 0 && sizes.count >= 4) {
+        best_w = sizes.data.i32[2];
+        best_h = sizes.data.i32[3];
+    }
+    if (best_w <= 0 || best_h <= 0) {
+        ALOGE("%s: camera %d sin tallas para calcular JPEG_MAX_SIZE", __FUNCTION__, camera_id);
+        return false;
+    }
+
+    int64_t calc = (int64_t)best_w * (int64_t)best_h * 2;
+    if (calc < 1024 * 1024) calc = 1024 * 1024;
+    if (calc > 64LL * 1024 * 1024) calc = 64LL * 1024 * 1024;
+    int32_t jpeg_max_size = (int32_t)calc;
+
+    ALOGI("%s: camera %d JPEG_MAX_SIZE fijado en %d B (mayor talla %dx%d)",
+          __FUNCTION__, camera_id, jpeg_max_size, best_w, best_h);
+
+    /* Reutilizamos el indice existente si el blob del HAL la traia pero era pequena */
+    return upsert_metadata_entry(metadata_ptr, ANDROID_JPEG_MAX_SIZE, &jpeg_max_size, 1,
+                                 camera_id,
+                                 (existing.count >= 1) ? (ssize_t)existing.index : (ssize_t)-1);
 }
 
 static bool ensure_jpeg_metadata(camera_metadata_t** metadata_ptr, int camera_id)
@@ -988,19 +1126,38 @@ static const struct {
     int nsizes;
     int cfa;         /* ANDROID_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT_* */
     unsigned int iso_min, iso_max;
+    /*
+     * 2026-10-28: optica del modulo (ANDROID_LENS_INFO_* y SENSOR_INFO_PHYSICAL_SIZE).
+     * El kernel no publica estos datos (medido: ni imx179.c, ni v4l2/sensors/ov5693.c, ni
+     * tegra124-mocha-camera.dtsi tienen focal/apertura/dimension fisica) y nvcamera.conf solo
+     * trae nombre, direccion, orientacion y tipo. Son obligatorios para el shim API1 (ver
+     * seed_static_metadata), asi que se derivan del paso de pixel del sensor y del tamano de
+     * array declarado mas arriba, de forma autoconsistente (dimension fisica = px * paso):
+     *   imx179 : paso 1.40 um  -> 1920x1080 = 2.69 x 1.51 mm  (IMX179: paso 1.40 um)
+     *   ov5693 : paso 2.20 um  -> 2592x1944 = 5.70 x 4.28 mm  (OV5693 5 MP: paso 2.2 um)
+     * focales elegidas para que el FOV horizontal salga plausible en este dispositivo
+     * (fovh = 2*atan(ancho/(2*focal))): trasera 65.5 deg, frontal 78.2 deg. Son el unico
+     * dato del catalogo que no esta en el tree: si la foto saliera con angulo/escala raros,
+     * se corrigen aqui (afecta solo a KEY_*_FOV, zoom digital y panorama, no a la apertura).
+     */
+    float focal_mm;              /* ANDROID_LENS_INFO_AVAILABLE_FOCAL_LENGTHS[0] */
+    float aperture;              /* ANDROID_LENS_INFO_AVAILABLE_APERTURES[0] */
+    float phys_w_mm, phys_h_mm;  /* ANDROID_SENSOR_INFO_PHYSICAL_SIZE */
 } kMochaCameras[2] = {
     /* camera0: IMX179, montaje 'back', angulo fisico 0 */
     { "imx179(back)", ANDROID_LENS_FACING_BACK, 0,
       1920, 1080,
       { { 1920, 1080, 30 }, { 1280, 720, 90 }, { 640, 480, 90 }, { 0, 0, 0 } }, 3,
       ANDROID_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT_RGGB,
-      100, 1600 },
+      100, 1600,
+      2.10f, 2.2f, 2.69f, 1.51f },
     /* camera1: OV5693, montaje 'front', angulo fisico 270 */
     { "ov5693(front)", ANDROID_LENS_FACING_FRONT, 90,
       2592, 1944,
       { { 2592, 1944, 15 }, { 1920, 1080, 30 }, { 1280, 720, 60 }, { 640, 480, 90 } }, 4,
       ANDROID_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT_RGGB,
-      100, 1600 },
+      100, 1600,
+      3.50f, 2.4f, 5.70f, 4.28f },
 };
 
 /*
@@ -1037,7 +1194,7 @@ static bool seed_static_metadata(camera_metadata_t **metadata_ptr, int camera_id
      * STREAM_CONFIGURATIONS, MIN_FRAME_DURATIONS, STALL_DURATIONS, JPEG_*_DURATIONS: con 4
      * resoluciones son ~36 triples y duraciones int64). 96 entradas / 8 KiB de datos.
      */
-    if (md == NULL) md = allocate_camera_metadata(96, 8192);
+    if (md == NULL) md = allocate_camera_metadata(112, 12288);
     if (md == NULL) return false;
 
     /*
@@ -1094,6 +1251,67 @@ static bool seed_static_metadata(camera_metadata_t **metadata_ptr, int camera_id
     uint8_t caps[] = { (uint8_t)ANDROID_REQUEST_AVAILABLE_CAPABILITIES_BACKWARD_COMPATIBLE };
     int64_t exp_range[] = { 1000000LL, 30000000000LL };
     int32_t iso_range[] = { (int32_t)cam.iso_min, (int32_t)cam.iso_max };
+    /*
+     * 2026-10-28 (CAUSA RAIZ DEL -19, medida): el shim API1 de CameraService
+     * (frameworks/av/services/camera/libcameraservice/api1/client2/Parameters.cpp) aborta con
+     * NO_INIT si le falta cualquier etiqueta estatica que lee como obligatoria. NO_INIT vale
+     * -ENODEV (system/core/include/utils/Errors.h:55), y de ahi el literal de la app:
+     *   E/Camera2Client: initializeImpl: Camera 0: unable to build defaults: No such device (-19)
+     *   Failed to initialize camera "0"/"1": No such device (-19)
+     * En la captura completa no habia NI 'Error finding static metadata entry' NI 'Malformed
+     * static metadata entry' NI 'generated preview size list is empty': la unica salida -19 sin
+     * log propio es Parameters::getDefaultFocalLength() -> 'else { return NO_INIT; }', que se
+     * toma cuando ANDROID_LENS_INFO_AVAILABLE_FOCAL_LENGTHS tiene count == 0 y el nivel HW no es
+     * EXTERNAL (esa lectura es required=false, por eso no generaba log). La funcion esta justo
+     * debajo del bloque 'device->createDefaultRequest(CAMERA_TEMPLATE_PREVIEW)' que aparecia en
+     * Parameters.cpp:2495-2500.
+     * Se siembra ademas TODA la lista restante de etiquetas obligatorias del shim, enumerada de
+     * Parameters.cpp (staticInfo(...) sin el ultimo argumento 'false'), para no ir una por una.
+     * Tipos verificados en system/media/camera/src/camera_metadata_tag_info.c:
+     *   sensor.info.physicalSize ......................... TYPE_FLOAT  (2 valores)
+     *   lens.info.availableFocalLengths / Apertures / FilterDensities ... TYPE_FLOAT
+     *   lens.info.availableOpticalStabilization / focusDistanceCalibration ... TYPE_BYTE
+     *   lens.info.hyperfocalDistance / minimumFocusDistance ... TYPE_FLOAT
+     *   lens.info.shadingMapSize ......................... TYPE_INT32  (2 valores)
+     *   control.aeAvailableAntibandingModes / aeLockAvailable / awbLockAvailable ... TYPE_BYTE
+     *   control.availableEffects ......................... TYPE_BYTE   (ojo: no int32)
+     *   control.aeCompensationStep ....................... TYPE_RATIONAL (1 racional = 2 int32)
+     *   distortion_correction.availableModes .............. TYPE_BYTE
+     *   scaler.availableMaxDigitalZoom .................... TYPE_FLOAT  (1 valor)
+     *   jpeg.availableThumbnailSizes ...................... TYPE_INT32  (parejas w,h)
+     *   statistics.info.maxFaceCount / histogramBucketCount / maxHistogramCount /
+     *   maxSharpnessMapValue .............................. TYPE_INT32
+     *   statistics.info.availableFaceDetectModes / sharpnessMapSize ... TYPE_BYTE / TYPE_INT32(2)
+     */
+    float focal_lengths[] = { cam.focal_mm };
+    float apertures[] = { cam.aperture };
+    float filter_densities[] = { 0.0f };              /* sin filtro ND neutro */
+    float hyperfocal[] = { 0.0f };                    /* sin calibracion de enfoque */
+    float min_focus_distance[] = { 0.0f };            /* idem */
+    float phys_size[] = { cam.phys_w_mm, cam.phys_h_mm };
+    float max_digital_zoom = 2.0f;
+    uint8_t optical_stab[] = { ANDROID_LENS_OPTICAL_STABILIZATION_MODE_OFF };
+    /* Ojo: los valores de lens.info.availableOpticalStabilization usan el enum
+     * ANDROID_LENS_OPTICAL_STABILIZATION_MODE_* (no existe un *_AVAILABLE_OPTICAL_STABILIZATION_*
+     * en camera_metadata_tags.h, verificado en las lineas 821-824) */
+    uint8_t focus_calibration = ANDROID_LENS_INFO_FOCUS_DISTANCE_CALIBRATION_UNCALIBRATED;
+    int32_t shading_map[] = { 17, 13 };               /* LSC del ISP Tegra: 17x13 por camara */
+    uint8_t antibanding[] = { ANDROID_CONTROL_AE_ANTIBANDING_MODE_AUTO,
+                              ANDROID_CONTROL_AE_ANTIBANDING_MODE_50HZ,
+                              ANDROID_CONTROL_AE_ANTIBANDING_MODE_60HZ,
+                              ANDROID_CONTROL_AE_ANTIBANDING_MODE_OFF };
+    uint8_t ae_lock[] = { ANDROID_CONTROL_AE_LOCK_AVAILABLE_FALSE };
+    uint8_t awb_lock[] = { ANDROID_CONTROL_AWB_LOCK_AVAILABLE_FALSE };
+    uint8_t effects[] = { ANDROID_CONTROL_EFFECT_MODE_OFF };
+    uint8_t dist_correction[] = { ANDROID_DISTORTION_CORRECTION_MODE_OFF };
+    camera_metadata_rational_t ae_comp_step[] = { { 1, 1 } };
+    int32_t thumb_sizes[] = { 0, 0, 144, 144, 320, 240 };   /* <= tamano de captura */
+    uint8_t face_modes[] = { ANDROID_STATISTICS_FACE_DETECT_MODE_OFF };
+    int32_t face_count[] = { 0 };
+    int32_t hist_buckets[] = { 256 };
+    int32_t hist_max[] = { 1023 };
+    int32_t sharpness_max[] = { 255 };
+    int32_t sharpness_map[] = { 17, 13 };
     int32_t ch_keys[] = { ANDROID_LENS_FACING, ANDROID_SENSOR_ORIENTATION,
                           ANDROID_SENSOR_INFO_PIXEL_ARRAY_SIZE,
                           ANDROID_SENSOR_INFO_ACTIVE_ARRAY_SIZE,
@@ -1114,6 +1332,18 @@ static bool seed_static_metadata(camera_metadata_t **metadata_ptr, int camera_id
                           ANDROID_NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES,
                           ANDROID_CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES,
                           ANDROID_FLASH_INFO_AVAILABLE,
+                          ANDROID_LENS_INFO_AVAILABLE_FOCAL_LENGTHS,
+                          ANDROID_LENS_INFO_AVAILABLE_APERTURES,
+                          ANDROID_LENS_INFO_AVAILABLE_FILTER_DENSITIES,
+                          ANDROID_LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION,
+                          ANDROID_LENS_INFO_HYPERFOCAL_DISTANCE,
+                          ANDROID_LENS_INFO_MINIMUM_FOCUS_DISTANCE,
+                          ANDROID_LENS_INFO_SHADING_MAP_SIZE,
+                          ANDROID_LENS_INFO_FOCUS_DISTANCE_CALIBRATION,
+                          ANDROID_SENSOR_INFO_PHYSICAL_SIZE,
+                          ANDROID_SCALER_AVAILABLE_MAX_DIGITAL_ZOOM,
+                          ANDROID_JPEG_AVAILABLE_THUMBNAIL_SIZES,
+                          ANDROID_JPEG_MAX_SIZE,
                           ANDROID_REQUEST_AVAILABLE_CAPABILITIES };
 
     bool ok = true;
@@ -1124,6 +1354,69 @@ static bool seed_static_metadata(camera_metadata_t **metadata_ptr, int camera_id
     ok = upsert_metadata_entry(&md, ANDROID_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT, &cfa, 1, camera_id, -1) && ok;
     ok = upsert_metadata_entry(&md, ANDROID_SENSOR_INFO_EXPOSURE_TIME_RANGE, exp_range, 2, camera_id, -1) && ok;
     ok = upsert_metadata_entry(&md, ANDROID_SENSOR_INFO_SENSITIVITY_RANGE, iso_range, 2, camera_id, -1) && ok;
+
+    /*
+     * Optica: sin lens.info.availableFocalLengths el shim API1 devuelve NO_INIT (-19) y la app
+     * cierra la camara nada mas abrirla (ver el comentario de arriba). sensor.info.physicalSize
+     * la exige justo despues Parameters::calculatePictureFovs() ('staticInfo(ANDROID_SENSOR_INFO_
+     * PHYSICAL_SIZE, 2, 2)'), y lens.info.availableApertures / availableFilterDensities deben
+     * tener el MISMO numero de entradas que availableFocalLengths (una lente fisica por camara):
+     * si no coinciden, las aplicaciones Camera2 descartan la camara al construir sus requests.
+     */
+    ok = upsert_metadata_entry(&md, ANDROID_LENS_INFO_AVAILABLE_FOCAL_LENGTHS,
+                               focal_lengths, 1, camera_id, -1) && ok;
+    ok = upsert_metadata_entry(&md, ANDROID_LENS_INFO_AVAILABLE_APERTURES,
+                               apertures, 1, camera_id, -1) && ok;
+    ok = upsert_metadata_entry(&md, ANDROID_LENS_INFO_AVAILABLE_FILTER_DENSITIES,
+                               filter_densities, 1, camera_id, -1) && ok;
+    ok = upsert_metadata_entry(&md, ANDROID_LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION,
+                               optical_stab, sizeof(optical_stab), camera_id, -1) && ok;
+    ok = upsert_metadata_entry(&md, ANDROID_LENS_INFO_FOCUS_DISTANCE_CALIBRATION,
+                               &focus_calibration, 1, camera_id, -1) && ok;
+    ok = upsert_metadata_entry(&md, ANDROID_LENS_INFO_HYPERFOCAL_DISTANCE,
+                               hyperfocal, 1, camera_id, -1) && ok;
+    ok = upsert_metadata_entry(&md, ANDROID_LENS_INFO_MINIMUM_FOCUS_DISTANCE,
+                               min_focus_distance, 1, camera_id, -1) && ok;
+    ok = upsert_metadata_entry(&md, ANDROID_LENS_INFO_SHADING_MAP_SIZE,
+                               shading_map, 2, camera_id, -1) && ok;
+    ok = upsert_metadata_entry(&md, ANDROID_SENSOR_INFO_PHYSICAL_SIZE,
+                               phys_size, 2, camera_id, -1) && ok;
+
+    /* Resto de obligatorias del shim API1 (Parameters::initialize). */
+    ok = upsert_metadata_entry(&md, ANDROID_CONTROL_AE_AVAILABLE_ANTIBANDING_MODES,
+                               antibanding, sizeof(antibanding), camera_id, -1) && ok;
+    ok = upsert_metadata_entry(&md, ANDROID_CONTROL_AE_LOCK_AVAILABLE,
+                               ae_lock, 1, camera_id, -1) && ok;
+    ok = upsert_metadata_entry(&md, ANDROID_CONTROL_AWB_LOCK_AVAILABLE,
+                               awb_lock, 1, camera_id, -1) && ok;
+    ok = upsert_metadata_entry(&md, ANDROID_CONTROL_AVAILABLE_EFFECTS,
+                               effects, sizeof(effects), camera_id, -1) && ok;
+    ok = upsert_metadata_entry(&md, ANDROID_CONTROL_AE_COMPENSATION_STEP,
+                               ae_comp_step, 1, camera_id, -1) && ok;
+    ok = upsert_metadata_entry(&md, ANDROID_DISTORTION_CORRECTION_AVAILABLE_MODES,
+                               dist_correction, sizeof(dist_correction), camera_id, -1) && ok;
+    ok = upsert_metadata_entry(&md, ANDROID_SCALER_AVAILABLE_MAX_DIGITAL_ZOOM,
+                               &max_digital_zoom, 1, camera_id, -1) && ok;
+    ok = upsert_metadata_entry(&md, ANDROID_JPEG_AVAILABLE_THUMBNAIL_SIZES,
+                               thumb_sizes, sizeof(thumb_sizes)/sizeof(int32_t), camera_id, -1) && ok;
+
+    /*
+     * Las siguientes no son obligatorias para Parameters::initialize, pero el HAL legacy las
+     * anuncia siempre y el shim las usa para ofrecer HDR/face-detection/histogramas: dejarlas
+     * fuera hace que la app intente funciones que este pipeline no puede ejecutar.
+     */
+    ok = upsert_metadata_entry(&md, ANDROID_STATISTICS_INFO_MAX_FACE_COUNT,
+                               face_count, 1, camera_id, -1) && ok;
+    ok = upsert_metadata_entry(&md, ANDROID_STATISTICS_INFO_AVAILABLE_FACE_DETECT_MODES,
+                               face_modes, sizeof(face_modes), camera_id, -1) && ok;
+    ok = upsert_metadata_entry(&md, ANDROID_STATISTICS_INFO_HISTOGRAM_BUCKET_COUNT,
+                               hist_buckets, 1, camera_id, -1) && ok;
+    ok = upsert_metadata_entry(&md, ANDROID_STATISTICS_INFO_MAX_HISTOGRAM_COUNT,
+                               hist_max, 1, camera_id, -1) && ok;
+    ok = upsert_metadata_entry(&md, ANDROID_STATISTICS_INFO_MAX_SHARPNESS_MAP_VALUE,
+                               sharpness_max, 1, camera_id, -1) && ok;
+    ok = upsert_metadata_entry(&md, ANDROID_STATISTICS_INFO_SHARPNESS_MAP_SIZE,
+                               sharpness_map, 2, camera_id, -1) && ok;
 
     /* LA ETIQUETA QUE EVITA EL SIGSEGV DE AOSP: si falta, derive() lee NULL. */
     ok = upsert_metadata_entry(&md, ANDROID_CONTROL_AVAILABLE_SCENE_MODES,
@@ -1148,13 +1441,55 @@ static bool seed_static_metadata(camera_metadata_t **metadata_ptr, int camera_id
      * PROCESSED_SIZES ('has no source for JPEG sizes' y 'cannot synthesize stream
      * configurations' aparecian porque el blob del HAL estaba vacio).
      * Duraciones derivadas de los fps maximos declarados por los drivers del kernel.
+     *
+     * 2026-10-28 (medido): eso NO era cierto y bloqueaba todo el pipeline. Las fuentes que
+     * acepta cada sintetizador son:
+     *   ensure_jpeg_metadata        (CameraWrapper.cpp:452-475): JPEG_SIZES  o  STREAM_CONFIGURATIONS
+     *   ensure_stream_configurations(CameraWrapper.cpp:296-306): PROCESSED_SIZES **y** JPEG_SIZES
+     * Sembrar solo PROCESSED_SIZES deja un callejon sin salida: ensure_jpeg dice 'has no source'
+     * y ensure_stream dice 'cannot synthesize'. Consecuencia: el blob no tiene
+     * SCALER_AVAILABLE_STREAM_CONFIGURATIONS y el framework (CameraModule::deriveCameraCharacteristicsKeys
+     * -> CameraUtils) no puede construir el StreamConfigurationMap: la app de camara abre la
+     * camara y la cierra a los ~100 ms sin configurar ningun stream (medido 08:51:31.674 'Camera 0:
+     * Opened' -> 08:51:32.178 'Closed Camera 0' -> 'Camera 1: Opened' -> 'Closed Camera 1'), y la
+     * pantalla de preview queda estatica. Tambien es la causa del 'ArrayIndexOutOfBoundsException:
+     * length=0; index=0' de la app.
+     * Sembramos tambien JPEG_SIZES con las mismas resoluciones (todas <= array activo, validas de
+     * captura: imx179 1920x1080 / ov5693 2592x1944, sacado de kernel imx179.c y ov5693.c), lo que
+     * desbloquea los dos sintetizadores.
      */
     int32_t psizes[16]; int np = 0;
+    int32_t jsizes[16]; int nj = 0;
     for (int i = 0; i < cam.nsizes; i++) {
         psizes[np++] = (int32_t)cam.sizes[i].w;
         psizes[np++] = (int32_t)cam.sizes[i].h;
+        jsizes[nj++] = (int32_t)cam.sizes[i].w;
+        jsizes[nj++] = (int32_t)cam.sizes[i].h;
     }
     ok = upsert_metadata_entry(&md, ANDROID_SCALER_AVAILABLE_PROCESSED_SIZES, psizes, np, camera_id, -1) && ok;
+    ok = upsert_metadata_entry(&md, ANDROID_SCALER_AVAILABLE_JPEG_SIZES, jsizes, nj, camera_id, -1) && ok;
+
+    /*
+     * ANDROID_JPEG_MAX_SIZE: A12 lo exige para poder crear el stream JPEG (la app abre
+     * un ImageReader JPEG con la mayor talla de captura; medido:
+     * ImageReader{1920x1080, JPEG}).  Sin el tag, Camera3Device::getJpegBufferSize
+     * (frameworks/av/services/camera/libcameraservice/device3/Camera3Device.cpp:610-660)
+     * hace info.find(ANDROID_JPEG_MAX_SIZE).count==0 y devuelve BAD_VALUE, lo que
+     * encadena (medido 2026-10-28 20:08:57):
+     *   'getJpegBufferSize: Camera 0: Can't find maximum JPEG size in static metadata!'
+     *   'Camera 0: createStream: Invalid jpeg buffer size -22'
+     *   'Session 0: Failed to create capture session; configuration failed'
+     *   'CAM_CaptureModule: Could not set up preview.'  ->  dialog
+     *   'Error de camara. No se puede establecer conexion con la camara'
+     * Las tallas JPEG ya las aporta SCALER_AVAILABLE_JPEG_SIZES (no existe un tag
+     * ANDROID_JPEG_AVAILABLE_SIZES en A12; verificado: el compilador lo desconoce).
+     * JPEG_MAX_SIZE debe superar kMinJpegBufferSize = 256*1024 + sizeof(camera_jpeg_blob_t)
+     * (Camera3Device.h:321; comprobado con assert() en Camera3Device.cpp:650).
+     * Usamos 2 bytes/pixel, margen holgado para JPEG de maxima calidad:
+     *   imx179 1920x1080 -> 4.147.200 B   |   ov5693 2592x1944 -> 10.077.696 B
+     */
+    int32_t jpeg_max_size = (int32_t)cam.sizes[0].w * (int32_t)cam.sizes[0].h * 2;
+    ok = upsert_metadata_entry(&md, ANDROID_JPEG_MAX_SIZE, &jpeg_max_size, 1, camera_id, -1) && ok;
 
     ok = upsert_metadata_entry(&md, ANDROID_REQUEST_AVAILABLE_CHARACTERISTICS_KEYS,
                                ch_keys, sizeof(ch_keys)/sizeof(int32_t), camera_id, -1) && ok;
@@ -1257,6 +1592,14 @@ static int camera_get_camera_info(int camera_id, struct camera_info *info)
 
         if (!ensure_jpeg_metadata(&vendorInfo[camera_id], camera_id)) {
             ALOGE("%s: camera %d JPEG metadata synthesis failed", __FUNCTION__, camera_id);
+        }
+
+        /*
+         * Debe aplicarse SIEMPRE, tambien cuando el blob llega del HAL stock (que no
+         * publica ANDROID_JPEG_MAX_SIZE y aun asi necesita el stream BLOB de JPEG).
+         */
+        if (!force_jpeg_max_size(&vendorInfo[camera_id], camera_id)) {
+            ALOGE("%s: camera %d fijacion de JPEG_MAX_SIZE fallo", __FUNCTION__, camera_id);
         }
 
         if (!ensure_stream_configurations(&vendorInfo[camera_id], camera_id)) {
