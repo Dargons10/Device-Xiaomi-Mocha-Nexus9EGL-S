@@ -1,0 +1,478 @@
+diff --git a/core/java/android/hardware/biometrics/BiometricPrompt.java b/core/java/android/hardware/biometrics/BiometricPrompt.java
+index 520234bcf050..9928c26c4e7f 100644
+--- a/core/java/android/hardware/biometrics/BiometricPrompt.java
++++ b/core/java/android/hardware/biometrics/BiometricPrompt.java
+@@ -432,6 +432,17 @@ public class BiometricPrompt implements BiometricAuthenticator, BiometricConstan
+             return this;
+         }
+ 
++        /**
++         * Set the class name if it is a confirm device credential activity.
++         * @return This builder.
++         * @hide
++         */
++        @NonNull
++        public Builder setClassNameIfItIsConfirmDeviceCredentialActivity() {
++            mPromptInfo.setClassNameIfItIsConfirmDeviceCredentialActivity();
++            return this;
++        }
++
+         /**
+          * Creates a {@link BiometricPrompt}.
+          *
+diff --git a/core/java/android/hardware/biometrics/PromptInfo.java b/core/java/android/hardware/biometrics/PromptInfo.java
+index 2742f0effde6..be0fb4a0d877 100644
+--- a/core/java/android/hardware/biometrics/PromptInfo.java
++++ b/core/java/android/hardware/biometrics/PromptInfo.java
+@@ -47,6 +47,7 @@ public class PromptInfo implements Parcelable {
+     private boolean mAllowBackgroundAuthentication;
+     private boolean mIgnoreEnrollmentState;
+     private boolean mIsForLegacyFingerprintManager = false;
++    private boolean mClassNameIfItIsConfirmDeviceCredentialActivity;
+ 
+     public PromptInfo() {
+ 
+@@ -213,6 +214,10 @@ public class PromptInfo implements Parcelable {
+         mAllowedSensorIds.add(sensorId);
+     }
+ 
++    public void setClassNameIfItIsConfirmDeviceCredentialActivity() {
++        mClassNameIfItIsConfirmDeviceCredentialActivity = true;
++    }
++
+     // Getters
+ 
+     public CharSequence getTitle() {
+diff --git a/core/jni/com_android_internal_os_KernelSingleProcessCpuThreadReader.cpp b/core/jni/com_android_internal_os_KernelSingleProcessCpuThreadReader.cpp
+index dfae68429f6d..fcad56eca1b3 100644
+--- a/core/jni/com_android_internal_os_KernelSingleProcessCpuThreadReader.cpp
++++ b/core/jni/com_android_internal_os_KernelSingleProcessCpuThreadReader.cpp
+@@ -21,6 +21,8 @@
+ 
+ #include <android-base/file.h>
+ #include <android-base/parseint.h>
++#include <optional>
++#include <vector>
+ #include <android-base/stringprintf.h>
+ #include <android-base/strings.h>
+ #include <android_runtime/Log.h>
+@@ -69,16 +71,25 @@ public:
+ class BpfCpuTimeInStateReader : public ICpuTimeInStateReader {
+ public:
+     size_t getCpuFrequencyCount() {
+-        std::optional<std::vector<std::vector<uint32_t>>> cpuFreqs = android::bpf::getCpuFreqs();
+-        if (!cpuFreqs) {
+-            ALOGE("Cannot obtain CPU frequency count");
+-            return 0;
+-        }
++        // Memoizado: la tabla de frecuencias no cambia en la vida del proceso, y en un
++        // kernel sin BPF (mocha: 3.10, sin bpffs; /sys/fs/bpf no existe) el intento
++        // fallaba SIEMPRE. Como KernelSingleProcessCpuThreadReader se instancia por
++        // proceso monitorizado (BatteryStats), el fallo se repetia: 265 registros de
++        // "Cannot obtain CPU frequency count" en las 7h26m de log analizado.
++        static const size_t freqCount = []() -> size_t {
++            std::optional<std::vector<std::vector<uint32_t>>> cpuFreqs = android::bpf::getCpuFreqs();
++            if (!cpuFreqs) {
++                ALOGW("CPU time-in-state (BPF) no disponible en este kernel; stats de "
++                      "frecuencia CPU por proceso deshabilitadas");
++                return size_t{0};
++            }
+ 
+-        size_t freqCount = 0;
+-        for (auto cluster : *cpuFreqs) {
+-            freqCount += cluster.size();
+-        }
++            size_t count = 0;
++            for (auto cluster : *cpuFreqs) {
++                count += cluster.size();
++            }
++            return count;
++        }();
+ 
+         return freqCount;
+     }
+diff --git a/core/res/res/values/config.xml b/core/res/res/values/config.xml
+index a7d55479d2c3..edde164acab2 100644
+--- a/core/res/res/values/config.xml
++++ b/core/res/res/values/config.xml
+@@ -4614,6 +4614,8 @@
+     <string-array name="config_biometric_sensors" translatable="false" >
+         <!-- <item>0:2:15</item>  ID0:Fingerprint:Strong -->
+     </string-array>
++    <!-- List of packages that are protected by biometric authentication. -->
++    <string-array name="config_biometric_protected_package_names" translatable="false"/>
+     <!--If true, allows the device to load udfps components on older HIDL implementations -->
+     <bool name="allow_test_udfps" translatable="false" >false</bool>
+ 
+diff --git a/core/res/res/values/symbols.xml b/core/res/res/values/symbols.xml
+index 06715613e90c..772d4cfcf584 100644
+--- a/core/res/res/values/symbols.xml
++++ b/core/res/res/values/symbols.xml
+@@ -2619,6 +2619,7 @@
+ 
+   <java-symbol type="string" name="config_biometric_prompt_ui_package" />
+   <java-symbol type="array" name="config_biometric_sensors" />
++  <java-symbol type="array" name="config_biometric_protected_package_names" />
+   <java-symbol type="bool" name="allow_test_udfps" />
+   <java-symbol type="array" name="config_udfps_sensor_props" />
+   <java-symbol type="array" name="config_sfps_sensor_props" />
+diff --git a/libs/hwui/jni/Typeface.cpp b/libs/hwui/jni/Typeface.cpp
+index d86d9ee56f4c..1f0e02d6da69 100644
+--- a/libs/hwui/jni/Typeface.cpp
++++ b/libs/hwui/jni/Typeface.cpp
+@@ -162,11 +162,23 @@ static void Typeface_registerGenericFamily(JNIEnv *env, jobject, jstring familyN
+ #ifdef __ANDROID__
+ 
+ static bool getVerity(const std::string& path) {
++    // statx() llego en el kernel 4.14; el kernel 3.10 de mocha no lo tiene y
++    // devolve ENOSYS para cada fuente de cada proceso (108+ lineas de log en un
++    // arranque normal). Memorizar el resultado elimina el spam y los syscalls
++    // inutiles; sin statx tampoco hay dm-verity, asi que 'false' es correcto.
++    static volatile int statxSupported = -1;
++    if (statxSupported == 0) return false;
+     struct statx out = {};
+     if (statx(AT_FDCWD, path.c_str(), 0 /* flags */, STATX_ALL, &out) != 0) {
+-        ALOGE("statx failed for %s, errno = %d", path.c_str(), errno);
++        if (errno == ENOSYS) {
++            statxSupported = 0;
++        } else {
++            statxSupported = 1;
++            ALOGE("statx failed for %s, errno = %d", path.c_str(), errno);
++        }
+         return false;
+     }
++    statxSupported = 1;
+ 
+     // Validity check.
+     if ((out.stx_attributes_mask & STATX_ATTR_VERITY) == 0) {
+diff --git a/libs/hwui/renderthread/EglManager.cpp b/libs/hwui/renderthread/EglManager.cpp
+index c7d7a17a23eb..c4abaf85de0b 100644
+--- a/libs/hwui/renderthread/EglManager.cpp
++++ b/libs/hwui/renderthread/EglManager.cpp
+@@ -34,6 +34,14 @@
+ 
+ #define GLES_VERSION 2
+ 
++// Tegra's default display cannot be rebuilt after eglTerminate followed by
++// eglReleaseThread. Keep only the thread state; still release the display,
++// context and pbuffer on trim. Other drivers retain the upstream teardown.
++static bool eglSkipReleaseThread() {
++    static bool value = property_get_bool("ro.egl.skip_release_thread", false);
++    return value;
++}
++
+ // Android-specific addition that is used to show when frames began in systrace
+ EGLAPI void EGLAPIENTRY eglBeginFrame(EGLDisplay dpy, EGLSurface surface);
+ 
+@@ -446,7 +454,9 @@ void EglManager::destroy() {
+     }
+     eglMakeCurrent(mEglDisplay, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+     eglTerminate(mEglDisplay);
+-    eglReleaseThread();
++    if (!eglSkipReleaseThread()) {
++        eglReleaseThread();
++    }
+ 
+     mEglDisplay = EGL_NO_DISPLAY;
+     mEglContext = EGL_NO_CONTEXT;
+diff --git a/libs/hwui/renderthread/RenderThread.cpp b/libs/hwui/renderthread/RenderThread.cpp
+index f83c0a4926f9..c3c3f7cc9736 100644
+--- a/libs/hwui/renderthread/RenderThread.cpp
++++ b/libs/hwui/renderthread/RenderThread.cpp
+@@ -477,8 +477,14 @@ bool RenderThread::isCurrent() {
+ void RenderThread::preload() {
+     // EGL driver is always preloaded only if HWUI renders with GL.
+     if (Properties::getRenderPipelineType() == RenderPipelineType::SkiaGL) {
+-        std::thread eglInitThread([]() { eglGetDisplay(EGL_DEFAULT_DISPLAY); });
+-        eglInitThread.detach();
++        // preload() ya se envia por RenderProxy a ESTE hilo. Los drivers EGL
++        // legacy (Tegra 334.00) guardan el estado de display/global por proceso
++        // dentro de la propia libreria: un hilo suelto de preload llama a
++        // eglGetDisplay() en paralelo con el eglGetDisplay()/eglInitialize() del
++        // primer frame y, al terminar, puede derribar ese estado compartido
++        // (eglReleaseThread implicito en el exit de hilo). Hacerlo inline evita la
++        // carrera en la primera frame.
++        eglGetDisplay(EGL_DEFAULT_DISPLAY);
+     } else {
+         requireVkContext();
+     }
+diff --git a/mms/java/android/telephony/MmsManager.java b/mms/java/android/telephony/MmsManager.java
+index d541da09f45d..8aa4d6ac56e9 100644
+--- a/mms/java/android/telephony/MmsManager.java
++++ b/mms/java/android/telephony/MmsManager.java
+@@ -26,6 +26,7 @@ import android.net.Uri;
+ import android.os.Bundle;
+ import android.os.RemoteException;
+ import android.os.ServiceManager;
++import android.os.UserHandle;
+ 
+ import com.android.internal.telephony.IMms;
+ 
+@@ -69,7 +70,8 @@ public class MmsManager {
+                 return;
+             }
+ 
+-            iMms.sendMessage(subId, ActivityThread.currentPackageName(), contentUri,
++            iMms.sendMessage(subId, UserHandle.getCallingUserId(),
++                    ActivityThread.currentPackageName(), contentUri,
+                     locationUrl, configOverrides, sentIntent, messageId);
+         } catch (RemoteException e) {
+             // Ignore it
+@@ -100,7 +102,8 @@ public class MmsManager {
+             if (iMms == null) {
+                 return;
+             }
+-            iMms.downloadMessage(subId, ActivityThread.currentPackageName(),
++            iMms.downloadMessage(subId, UserHandle.getCallingUserId(),
++                    ActivityThread.currentPackageName(),
+                     locationUrl, contentUri, configOverrides, downloadedIntent,
+                     messageId);
+         } catch (RemoteException e) {
+diff --git a/mms/java/com/android/internal/telephony/IMms.aidl b/mms/java/com/android/internal/telephony/IMms.aidl
+index e0e0a4a812e4..e2689de4f4e5 100644
+--- a/mms/java/com/android/internal/telephony/IMms.aidl
++++ b/mms/java/com/android/internal/telephony/IMms.aidl
+@@ -39,7 +39,7 @@ interface IMms {
+      *  broadcast when the message is successfully sent, or failed
+      * @param messageId An id that uniquely identifies the message requested to be sent.
+      */
+-    void sendMessage(int subId, String callingPkg, in Uri contentUri,
++     void sendMessage(int subId, int callingUser, String callingPkg, in Uri contentUri,
+             String locationUrl, in Bundle configOverrides, in PendingIntent sentIntent,
+             in long messageId);
+ 
+@@ -58,7 +58,7 @@ interface IMms {
+      *  broadcast when the message is downloaded, or the download is failed
+      * @param messageId An id that uniquely identifies the message requested to be downloaded.
+     */
+-    void downloadMessage(int subId, String callingPkg, String locationUrl,
++     void downloadMessage(int subId, int callingUser, String callingPkg, String locationUrl,
+             in Uri contentUri, in Bundle configOverrides,
+             in PendingIntent downloadedIntent, in long messageId);
+ 
+@@ -88,7 +88,7 @@ interface IMms {
+       * @param read if the message is read
+       * @return the message URI, null if failed
+       */
+-    Uri importMultimediaMessage(String callingPkg, in Uri contentUri, String messageId,
++     Uri importMultimediaMessage(int callingUser, String callingPkg, in Uri contentUri, String messageId,
+             long timestampSecs, boolean seen, boolean read);
+ 
+     /**
+@@ -148,7 +148,7 @@ interface IMms {
+      * @param contentUri the content Uri from which to read PDU data of the draft MMS
+      * @return the URI of the stored draft message
+      */
+-    Uri addMultimediaMessageDraft(String callingPkg, in Uri contentUri);
++     Uri addMultimediaMessageDraft(int callingUser, String callingPkg, in Uri contentUri);
+ 
+     /**
+      * Send a system stored MMS message
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/phone/fragment/CollapsedStatusBarFragment.java b/packages/SystemUI/src/com/android/systemui/statusbar/phone/fragment/CollapsedStatusBarFragment.java
+index 713f72a2427e..6216302f6efc 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/phone/fragment/CollapsedStatusBarFragment.java
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/phone/fragment/CollapsedStatusBarFragment.java
+@@ -285,6 +285,9 @@ public class CollapsedStatusBarFragment extends Fragment implements CommandQueue
+ 
+     @Override
+     public void onTuningChanged(String key, String newValue) {
++        if (getContext() == null) {
++            return;
++        }
+         boolean wasClockBlacklisted = mIsClockBlacklisted;
+         mIsClockBlacklisted = StatusBarIconController.getIconHideList(
+                 getContext(), newValue).contains("clock");
+diff --git a/services/core/java/com/android/server/MmsServiceBroker.java b/services/core/java/com/android/server/MmsServiceBroker.java
+index 593c406ed47b..16b4b26d27ff 100644
+--- a/services/core/java/com/android/server/MmsServiceBroker.java
++++ b/services/core/java/com/android/server/MmsServiceBroker.java
+@@ -128,14 +128,14 @@ public class MmsServiceBroker extends SystemService {
+         }
+ 
+         @Override
+-        public void sendMessage(int subId, String callingPkg, Uri contentUri, String locationUrl,
++        public void sendMessage(int subId, int callingUser, String callingPkg, Uri contentUri, String locationUrl,
+                 Bundle configOverrides, PendingIntent sentIntent, long messageId)
+                 throws RemoteException {
+             returnPendingIntentWithError(sentIntent);
+         }
+ 
+         @Override
+-        public void downloadMessage(int subId, String callingPkg, String locationUrl,
++        public void downloadMessage(int subId, int callingUser, String callingPkg, String locationUrl,
+                 Uri contentUri, Bundle configOverrides, PendingIntent downloadedIntent,
+                 long messageId)
+                 throws RemoteException {
+@@ -149,7 +149,7 @@ public class MmsServiceBroker extends SystemService {
+         }
+ 
+         @Override
+-        public Uri importMultimediaMessage(String callingPkg, Uri contentUri, String messageId,
++        public Uri importMultimediaMessage(int callingUser, String callingPkg, Uri contentUri, String messageId,
+                 long timestampSecs, boolean seen, boolean read) throws RemoteException {
+             return null;
+         }
+@@ -185,7 +185,7 @@ public class MmsServiceBroker extends SystemService {
+         }
+ 
+         @Override
+-        public Uri addMultimediaMessageDraft(String callingPkg, Uri contentUri)
++        public Uri addMultimediaMessageDraft(int callingUser, String callingPkg, Uri contentUri)
+                 throws RemoteException {
+             return null;
+         }
+@@ -331,7 +331,7 @@ public class MmsServiceBroker extends SystemService {
+         private static final String PHONE_PACKAGE_NAME = "com.android.phone";
+ 
+         @Override
+-        public void sendMessage(int subId, String callingPkg, Uri contentUri,
++        public void sendMessage(int subId, int callingUser, String callingPkg, Uri contentUri,
+                 String locationUrl, Bundle configOverrides, PendingIntent sentIntent,
+                 long messageId)
+                 throws RemoteException {
+@@ -346,12 +346,12 @@ public class MmsServiceBroker extends SystemService {
+                     CarrierMessagingService.SERVICE_INTERFACE,
+                     Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                     subId);
+-            getServiceGuarded().sendMessage(subId, callingPkg, contentUri, locationUrl,
++            getServiceGuarded().sendMessage(subId, callingUser, callingPkg, contentUri, locationUrl,
+                     configOverrides, sentIntent, messageId);
+         }
+ 
+         @Override
+-        public void downloadMessage(int subId, String callingPkg, String locationUrl,
++        public void downloadMessage(int subId, int callingUser, String callingPkg, String locationUrl,
+                 Uri contentUri, Bundle configOverrides,
+                 PendingIntent downloadedIntent, long messageId) throws RemoteException {
+             Slog.d(TAG, "downloadMessage() by " + callingPkg);
+@@ -367,7 +367,7 @@ public class MmsServiceBroker extends SystemService {
+                     Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                     subId);
+ 
+-            getServiceGuarded().downloadMessage(subId, callingPkg, locationUrl, contentUri,
++            getServiceGuarded().downloadMessage(subId, callingUser, callingPkg, locationUrl, contentUri,
+                     configOverrides, downloadedIntent, messageId);
+         }
+ 
+@@ -385,7 +385,7 @@ public class MmsServiceBroker extends SystemService {
+         }
+ 
+         @Override
+-        public Uri importMultimediaMessage(String callingPkg, Uri contentUri,
++        public Uri importMultimediaMessage(int callingUser, String callingPkg, Uri contentUri,
+                 String messageId, long timestampSecs, boolean seen, boolean read)
+                 throws RemoteException {
+             if (getAppOpsManager().noteOp(AppOpsManager.OP_WRITE_SMS, Binder.getCallingUid(),
+@@ -395,7 +395,7 @@ public class MmsServiceBroker extends SystemService {
+                 return FAKE_MMS_SENT_URI;
+             }
+             return getServiceGuarded().importMultimediaMessage(
+-                    callingPkg, contentUri, messageId, timestampSecs, seen, read);
++                    callingUser, callingPkg, contentUri, messageId, timestampSecs, seen, read);
+         }
+ 
+         @Override
+@@ -453,7 +453,7 @@ public class MmsServiceBroker extends SystemService {
+         }
+ 
+         @Override
+-        public Uri addMultimediaMessageDraft(String callingPkg, Uri contentUri)
++        public Uri addMultimediaMessageDraft(int callingUser, String callingPkg, Uri contentUri)
+                 throws RemoteException {
+             if (getAppOpsManager().noteOp(AppOpsManager.OP_WRITE_SMS, Binder.getCallingUid(),
+                     callingPkg) != AppOpsManager.MODE_ALLOWED) {
+@@ -461,7 +461,7 @@ public class MmsServiceBroker extends SystemService {
+                 // while writing the TelephonyProvider
+                 return FAKE_MMS_DRAFT_URI;
+             }
+-            return getServiceGuarded().addMultimediaMessageDraft(callingPkg, contentUri);
++            return getServiceGuarded().addMultimediaMessageDraft(callingUser, callingPkg, contentUri);
+         }
+ 
+         @Override
+diff --git a/services/core/java/com/android/server/display/DisplayPowerController.java b/services/core/java/com/android/server/display/DisplayPowerController.java
+index d590ae8fa6d0..b9283169ddc1 100644
+--- a/services/core/java/com/android/server/display/DisplayPowerController.java
++++ b/services/core/java/com/android/server/display/DisplayPowerController.java
+@@ -531,7 +531,13 @@ final class DisplayPowerController implements AutomaticBrightnessController.Call
+ 
+         setUpAutoBrightness(resources, handler);
+ 
+-        mColorFadeEnabled = !ActivityManager.isLowRamDeviceStatic();
++        /* Tegra124 (mocha): the ColorFade surface stalls on the EGL blob at
++           screen-off (dequeueBuffer to SurfaceFlinger never returns while
++           e.g. a media scan saturates I/O), wedging the PowerManagerService
++           handler until the watchdog soft-reboots system_server. Default it
++           off here; opt back in with persist.sys.display.color_fade=1. */
++        mColorFadeEnabled = SystemProperties.getInt("persist.sys.display.color_fade", 0) != 0
++                && !ActivityManager.isLowRamDeviceStatic();
+         mColorFadeFadesConfig = resources.getBoolean(
+                 com.android.internal.R.bool.config_animateScreenLights);
+ 
+diff --git a/services/core/java/com/android/server/power/Notifier.java b/services/core/java/com/android/server/power/Notifier.java
+index f62bea945f51..a9d8fe5d779f 100644
+--- a/services/core/java/com/android/server/power/Notifier.java
++++ b/services/core/java/com/android/server/power/Notifier.java
+@@ -840,7 +840,7 @@ public class Notifier {
+         final String soundPath = Settings.Global.getString(mContext.getContentResolver(),
+                 wireless ? Settings.Global.WIRELESS_CHARGING_STARTED_SOUND
+                         : Settings.Global.CHARGING_STARTED_SOUND);
+-        if ("silent".equals(soundPath)) {
++        if (soundPath == null || "silent".equals(soundPath)) {
+             return;
+         }
+ 
+diff --git a/services/core/java/com/android/server/wm/TaskSnapshotPersister.java b/services/core/java/com/android/server/wm/TaskSnapshotPersister.java
+index 9fbcd7cc5d84..ee751c323697 100644
+--- a/services/core/java/com/android/server/wm/TaskSnapshotPersister.java
++++ b/services/core/java/com/android/server/wm/TaskSnapshotPersister.java
+@@ -415,6 +415,12 @@ class TaskSnapshotPersister {
+             }
+ 
+             final Bitmap swBitmap = bitmap.copy(Config.ARGB_8888, false /* isMutable */);
++            if (swBitmap == null) {
++                // Hardware readback can fail transiently on legacy EGL drivers;
++                // skip persisting this snapshot instead of crashing.
++                Slog.e(TAG, "Failed to copy task snapshot to a software bitmap");
++                return false;
++            }
+ 
+             final File file = getHighResolutionBitmapFile(mTaskId, mUserId);
+             try {
+diff --git a/services/core/java/com/android/server/wm/WindowManagerService.java b/services/core/java/com/android/server/wm/WindowManagerService.java
+index d25b4d122ba9..ef00ed720dfa 100644
+--- a/services/core/java/com/android/server/wm/WindowManagerService.java
++++ b/services/core/java/com/android/server/wm/WindowManagerService.java
+@@ -1012,9 +1012,9 @@ public class WindowManagerService extends IWindowManager.Stub
+     PowerManager mPowerManager;
+     PowerManagerInternal mPowerManagerInternal;
+ 
+-    private float mWindowAnimationScaleSetting = 1.0f;
+-    private float mTransitionAnimationScaleSetting = 1.0f;
+-    private float mAnimatorDurationScaleSetting = 1.0f;
++    private float mWindowAnimationScaleSetting = 0.0f;
++    private float mTransitionAnimationScaleSetting = 0.0f;
++    private float mAnimatorDurationScaleSetting = 0.0f;
+     private boolean mAnimationsDisabled = false;
+     boolean mPointerLocationEnabled = false;
+ 
+diff --git a/telephony/common/com/android/internal/telephony/TelephonyPermissions.java b/telephony/common/com/android/internal/telephony/TelephonyPermissions.java
+index 7a424c87d1d6..77149ccdf9b9 100644
+--- a/telephony/common/com/android/internal/telephony/TelephonyPermissions.java
++++ b/telephony/common/com/android/internal/telephony/TelephonyPermissions.java
+@@ -749,6 +749,15 @@ public final class TelephonyPermissions {
+         throw new SecurityException(message + ": Only shell user can call it");
+     }
+ 
++    /**
++     * Returns whether the given uid is the shell (or root) uid.
++     *
++     * @param uid the uid to check.
++     */
++    public static boolean isShell(int uid) {
++        return uid == Process.SHELL_UID || uid == Process.ROOT_UID;
++    }
++
+     /**
+      * Returns the target SDK version number for a given package name.
+      *

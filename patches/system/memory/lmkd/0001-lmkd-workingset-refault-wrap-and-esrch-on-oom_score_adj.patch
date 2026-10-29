@@ -1,0 +1,35 @@
+diff --git a/lmkd.cpp b/lmkd.cpp
+index 926a1d0..b908dde 100644
+--- a/lmkd.cpp
++++ b/lmkd.cpp
+@@ -976,7 +976,17 @@ static bool writefilestring(const char *path, const char *s,
+ 
+     ret = TEMP_FAILURE_RETRY(write(fd, s, len));
+     if (ret < 0) {
+-        ALOGE("Error writing %s; errno=%d", path, errno);
++        /*
++         * ESRCH (errno=3): el objetivo ya ha muerto entre open() y write().
++         * En un kernel 3.10 con Zygote/Launcher relanzados con frecuencia esto es una
++         * carrera normal del propio lmkd, no un fallo: el registro del task ya no existe.
++         * El log capturado lo mostraba como:
++         *   E lowmemorykiller: Error writing /proc/3039/oom_score_adj; errno=3
++         * Mantener el silencio solo para ESRCH; el resto de errores se siguen reportando.
++         */
++        if (errno != ESRCH) {
++            ALOGE("Error writing %s; errno=%d", path, errno);
++        }
+     } else if (ret < len) {
+         ALOGE("Short write on %s; length=%zd", path, ret);
+     }
+@@ -2570,6 +2580,11 @@ static void mp_event_psi(int data, uint32_t events, struct polling_params *poll_
+          * changing
+          */
+         goto no_kill;
++    } else if (workingset_refault_file < prev_workingset_refault) {
++        /* workingset_refault counter wrapped or is unavailable, reset baseline */
++        prev_workingset_refault = workingset_refault_file;
++        init_ws_refault = workingset_refault_file;
++        goto no_kill;
+     }
+ 
+     prev_workingset_refault = workingset_refault_file;

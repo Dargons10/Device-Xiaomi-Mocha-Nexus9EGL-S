@@ -1,0 +1,1196 @@
+diff --git a/camera/Android.bp b/camera/Android.bp
+index 1924e80b78..0c9c4ae8cf 100644
+--- a/camera/Android.bp
++++ b/camera/Android.bp
+@@ -47,6 +47,16 @@ cc_library_shared {
+     name: "libcamera_client",
+     defaults: ["camera_parameter_library_defaults"],
+ 
++    // Legacy (HAL1) vendor camera HALs, e.g. the NVIDIA Tegra camera.tegra
++    // wrapper on mocha, link against libcamera_client from the vendor
++    // module namespace.  On this device the vendor-side soname is provided
++    // by libmocha_camera.so (legacy-ABI reimplementation, device/xiaomi),
++    // symlinked as libcamera_client.so in the vendor image, so no vendor
++    // variant is installed here; the flag only enables the vendor variant
++    // for linking the wrapper module.
++    vendor_available: true,
++    double_loadable: true,
++
+     aidl: {
+         export_aidl_headers: true,
+         local_include_dirs: ["aidl"],
+diff --git a/media/codec2/components/aac/C2SoftAacDec.cpp b/media/codec2/components/aac/C2SoftAacDec.cpp
+index 57cdcd0a9d..068b71a87a 100644
+--- a/media/codec2/components/aac/C2SoftAacDec.cpp
++++ b/media/codec2/components/aac/C2SoftAacDec.cpp
+@@ -23,6 +23,7 @@
+ #include <numeric>
+ 
+ #include <cutils/properties.h>
++#include <utils/Timers.h>
+ #include <media/stagefright/foundation/MediaDefs.h>
+ #include <media/stagefright/foundation/hexdump.h>
+ #include <media/stagefright/MediaErrors.h>
+@@ -54,7 +55,7 @@
+ 
+ namespace android {
+ 
+-constexpr char COMPONENT_NAME[] = "c2.android.aac.decoder";
++constexpr char COMPONENT_NAME[] = "c2.android.aac.decoder.fdk.disabled";
+ constexpr size_t kDefaultOutputPortDelay = 2;
+ constexpr size_t kMaxOutputPortDelay = 16;
+ 
+@@ -554,6 +555,7 @@ void C2SoftAacDec::drainRingBuffer(
+ void C2SoftAacDec::process(
+         const std::unique_ptr<C2Work> &work,
+         const std::shared_ptr<C2BlockPool> &pool) {
++    int64_t processStart = systemTime(SYSTEM_TIME_MONOTONIC);
+     // Initialize output work
+     work->result = C2_OK;
+     work->workletsProcessed = 1u;
+@@ -573,12 +575,15 @@ void C2SoftAacDec::process(
+     size_t offset = 0u;
+     size_t size = 0u;
+     if (!work->input.buffers.empty()) {
++        ALOGI("TIMING before map() nbufs=%zu", work->input.buffers.size());
+         view = work->input.buffers[0]->data().linearBlocks().front().map().get();
+         size = view.capacity();
++        ALOGI("TIMING after map() size=%zu", size);
+     }
+ 
+     bool eos = (work->input.flags & C2FrameData::FLAG_END_OF_STREAM) != 0;
+     bool codecConfig = (work->input.flags & C2FrameData::FLAG_CODEC_CONFIG) != 0;
++    ALOGI("TIMING process() entry size=%zu codecConfig=%d eos=%d", size, (int)codecConfig, (int)eos);
+ 
+     //TODO
+ #if 0
+@@ -614,8 +619,22 @@ void C2SoftAacDec::process(
+     inInfo.timestamp = work->input.ordinal.timestamp.peeku();
+     inInfo.bufferSize = size;
+     inInfo.decodedSizes.clear();
++    const int64_t kProcessTimeoutMs = 50000; // 50s internal timeout
++    int iteration = 0;
++    const int kMaxIterations = 1000;
+     while (size > 0u) {
+-        ALOGV("size = %zu", size);
++        iteration++;
++        if (iteration > kMaxIterations) {
++            ALOGW("TIMING while loop hit max iterations (%d), breaking", kMaxIterations);
++            break;
++        }
++        int64_t elapsedMs = (systemTime(SYSTEM_TIME_MONOTONIC) - processStart) / 1000;
++        if (elapsedMs > kProcessTimeoutMs) {
++            ALOGW("TIMING while loop hit internal timeout (%lldms), breaking", (long long)elapsedMs);
++            break;
++        }
++        ALOGV("size = %zu iter=%d", size, iteration);
++        ALOGI("TIMING while loop iter=%d size=%zu", iteration, size);
+         if (mIntf->isAdts()) {
+             size_t adtsHeaderSize = 0;
+             // skip 30 bits, aac_frame_length follows.
+@@ -677,10 +696,15 @@ void C2SoftAacDec::process(
+         INT prevNumChannels = mStreamInfo->numChannels;
+         INT prevOutLoudness = mStreamInfo->outputLoudness;
+ 
+-        aacDecoder_Fill(mAACDecoder,
+-                        inBuffer,
+-                        inBufferLength,
+-                        bytesValid);
++        {
++            int64_t t0 = systemTime(SYSTEM_TIME_MONOTONIC);
++            aacDecoder_Fill(mAACDecoder,
++                            inBuffer,
++                            inBufferLength,
++                            bytesValid);
++            int64_t t1 = systemTime(SYSTEM_TIME_MONOTONIC);
++            ALOGI("TIMING aacDecoder_Fill took %lld us (inLen=%u)", (long long)(t1 - t0), inBufferLength[0]);
++        }
+ 
+         // run DRC check
+         mDrcWrap.submitStreamData(mStreamInfo);
+@@ -731,6 +755,12 @@ void C2SoftAacDec::process(
+         UINT inBufferUsedLength = inBufferLength[0] - bytesValid[0];
+         size -= inBufferUsedLength;
+         offset += inBufferUsedLength;
++        ALOGI("TIMING Fill consumed %u bytes, size remaining=%u", inBufferUsedLength, size);
++
++        if (inBufferUsedLength == 0) {
++            ALOGW("aacDecoder_Fill consumed 0 bytes, breaking to avoid infinite loop");
++            break;
++        }
+ 
+         AAC_DECODER_ERROR decoderErr;
+         do {
+@@ -743,10 +773,15 @@ void C2SoftAacDec::process(
+             }
+ 
+             int numConsumed = mStreamInfo->numTotalBytes;
+-            decoderErr = aacDecoder_DecodeFrame(mAACDecoder,
+-                                       tmpOutBuffer,
+-                                       2048 * MAX_CHANNEL_COUNT,
+-                                       0 /* flags */);
++            {
++                int64_t t0 = systemTime(SYSTEM_TIME_MONOTONIC);
++                decoderErr = aacDecoder_DecodeFrame(mAACDecoder,
++                                           tmpOutBuffer,
++                                           2048 * MAX_CHANNEL_COUNT,
++                                           0 /* flags */);
++                int64_t t1 = systemTime(SYSTEM_TIME_MONOTONIC);
++                ALOGI("TIMING aacDecoder_DecodeFrame took %lld us, err=0x%x", (long long)(t1 - t0), (int)decoderErr);
++            }
+ 
+             numConsumed = mStreamInfo->numTotalBytes - numConsumed;
+ 
+@@ -916,6 +951,10 @@ void C2SoftAacDec::process(
+ 
+         } while (decoderErr == AAC_DEC_OK);
+     }
++    {
++        int64_t processEnd = systemTime(SYSTEM_TIME_MONOTONIC);
++        ALOGI("TIMING process() loop took %lld us", (long long)(processEnd - processStart));
++    }
+ 
+     int32_t outputDelay = mStreamInfo->outputDelay * mStreamInfo->numChannels;
+ 
+@@ -961,6 +1000,10 @@ void C2SoftAacDec::process(
+     } else {
+         drainRingBuffer(work, pool, false /* not EOS */);
+     }
++    {
++        int64_t processEnd = systemTime(SYSTEM_TIME_MONOTONIC);
++        ALOGI("TIMING process() total took %lld us", (long long)(processEnd - processStart));
++    }
+ }
+ 
+ c2_status_t C2SoftAacDec::drainInternal(
+diff --git a/media/codec2/components/avc/C2SoftAvcDec.cpp b/media/codec2/components/avc/C2SoftAvcDec.cpp
+index e8287f9344..7fb5e692ca 100644
+--- a/media/codec2/components/avc/C2SoftAvcDec.cpp
++++ b/media/codec2/components/avc/C2SoftAvcDec.cpp
+@@ -339,6 +339,8 @@ C2SoftAvcDec::C2SoftAvcDec(
+       mIntf(intfImpl),
+       mDecHandle(nullptr),
+       mOutBufferFlush(nullptr),
++      mYuvCpuBuffer(nullptr),
++      mYuvCpuBufferSize(0),
+       mIvColorFormat(IV_YUV_420P),
+       mOutputDelay(kDefaultOutputDelay),
+       mWidth(320),
+@@ -374,6 +376,11 @@ void C2SoftAvcDec::onRelease() {
+         ivd_aligned_free(nullptr, mOutBufferFlush);
+         mOutBufferFlush = nullptr;
+     }
++    if (mYuvCpuBuffer) {
++        free(mYuvCpuBuffer);
++        mYuvCpuBuffer = nullptr;
++        mYuvCpuBufferSize = 0;
++    }
+     if (mOutBlock) {
+         mOutBlock.reset();
+     }
+@@ -530,9 +537,8 @@ bool C2SoftAvcDec::setDecodeArgs(ivd_video_decode_ip_t *ps_decode_ip,
+                                  uint32_t tsMarker) {
+     uint32_t displayStride = mStride;
+     if (outBuffer) {
+-        C2PlanarLayout layout;
+-        layout = outBuffer->layout();
+-        displayStride = layout.planes[C2PlanarLayout::PLANE_Y].rowInc;
++        // Decode into the CPU YV12 buffer (Tegra gralloc cannot allocate YUV buffers).
++        displayStride = ALIGN32(mWidth);
+     }
+     uint32_t displayHeight = mHeight;
+     size_t lumaSize = displayStride * displayHeight;
+@@ -558,14 +564,14 @@ bool C2SoftAvcDec::setDecodeArgs(ivd_video_decode_ip_t *ps_decode_ip,
+     ps_decode_ip->s_out_buffer.u4_min_out_buf_size[1] = chromaSize;
+     ps_decode_ip->s_out_buffer.u4_min_out_buf_size[2] = chromaSize;
+     if (outBuffer) {
+-        if (outBuffer->height() < displayHeight) {
+-            ALOGE("Output buffer too small: provided (%dx%d) required (%ux%u)",
+-                  outBuffer->width(), outBuffer->height(), displayStride, displayHeight);
++        if (mYuvCpuBuffer) {
++            ps_decode_ip->s_out_buffer.pu1_bufs[0] = mYuvCpuBuffer;
++            ps_decode_ip->s_out_buffer.pu1_bufs[1] = mYuvCpuBuffer + lumaSize;
++            ps_decode_ip->s_out_buffer.pu1_bufs[2] = mYuvCpuBuffer + lumaSize + chromaSize;
++        } else {
++            ALOGE("CPU YV12 buffer not allocated (stride=%u height=%u)", displayStride, displayHeight);
+             return false;
+         }
+-        ps_decode_ip->s_out_buffer.pu1_bufs[0] = outBuffer->data()[C2PlanarLayout::PLANE_Y];
+-        ps_decode_ip->s_out_buffer.pu1_bufs[1] = outBuffer->data()[C2PlanarLayout::PLANE_U];
+-        ps_decode_ip->s_out_buffer.pu1_bufs[2] = outBuffer->data()[C2PlanarLayout::PLANE_V];
+     } else {
+         ps_decode_ip->s_out_buffer.pu1_bufs[0] = mOutBufferFlush;
+         ps_decode_ip->s_out_buffer.pu1_bufs[1] = mOutBufferFlush + lumaSize;
+@@ -781,8 +787,13 @@ c2_status_t C2SoftAvcDec::ensureDecoderState(const std::shared_ptr<C2BlockPool>
+         mOutBlock.reset();
+     }
+     if (!mOutBlock) {
+-        uint32_t format = HAL_PIXEL_FORMAT_YV12;
+-        C2MemoryUsage usage = { C2MemoryUsage::CPU_READ, C2MemoryUsage::CPU_WRITE };
++        // Tegra gralloc cannot allocate YUV (YV12/NV12/YCBCR_420_888) buffers, so we
++        // allocate an RGBA_8888 display buffer and convert YV12->RGBA_8888 in software.
++        uint32_t format = HAL_PIXEL_FORMAT_RGBA_8888;
++        // CPU_WRITE so we can fill the buffer in software; HW_COMPOSER_READ so
++        // SurfaceFlinger can read it for display.
++        C2MemoryUsage usage = { C2MemoryUsage::CPU_WRITE,
++                                 C2AndroidMemoryUsage::HW_COMPOSER_READ };
+         c2_status_t err =
+             pool->fetchGraphicBlock(ALIGN32(mWidth), mHeight, format, usage, &mOutBlock);
+         if (err != C2_OK) {
+@@ -793,6 +804,23 @@ c2_status_t C2SoftAvcDec::ensureDecoderState(const std::shared_ptr<C2BlockPool>
+               mOutBlock->width(), mOutBlock->height(), ALIGN32(mWidth), mHeight);
+     }
+ 
++    // Allocate the CPU YV12 scratch buffer the decoder writes into.
++    uint32_t cpuStride = ALIGN32(mWidth);
++    size_t cpuSize = (size_t)cpuStride * mHeight * 3 / 2;
++    if (!mYuvCpuBuffer || mYuvCpuBufferSize < cpuSize) {
++        if (mYuvCpuBuffer) {
++            free(mYuvCpuBuffer);
++            mYuvCpuBuffer = nullptr;
++            mYuvCpuBufferSize = 0;
++        }
++        mYuvCpuBuffer = (uint8_t *)memalign(128, cpuSize);
++        if (!mYuvCpuBuffer) {
++            ALOGE("could not allocate CPU YV12 buffer of size %zu", cpuSize);
++            return C2_NO_MEMORY;
++        }
++        mYuvCpuBufferSize = cpuSize;
++    }
++
+     return C2_OK;
+ }
+ 
+@@ -809,6 +837,9 @@ void C2SoftAvcDec::process(
+     work->result = C2_OK;
+     work->workletsProcessed = 0u;
+     work->worklets.front()->output.flags = work->input.flags;
++    ALOGD("DBG processEntry: frameIndex=%llu nbufs=%zu sigErr=%d sigEos=%d",
++          (unsigned long long)work->input.ordinal.frameIndex.peeku(),
++          work->input.buffers.size(), (int)mSignalledError, (int)mSignalledOutputEos);
+     if (mSignalledError || mSignalledOutputEos) {
+         work->result = C2_BAD_VALUE;
+         return;
+@@ -827,9 +858,16 @@ void C2SoftAvcDec::process(
+             return;
+         }
+     }
++    ALOGD("DBG processMapped: frameIndex=%llu inSize=%zu rViewErr=%d",
++          (unsigned long long)work->input.ordinal.frameIndex.peeku(),
++          inSize, rView.error());
+     bool eos = ((work->input.flags & C2FrameData::FLAG_END_OF_STREAM) != 0);
+     bool hasPicture = false;
+ 
++    ALOGD("DBG process: inSize=%zu nbufs=%zu eos=%d sigErr=%d sigEos=%d ts=%llu",
++          inSize, work->input.buffers.size(), (int)eos, (int)mSignalledError,
++          (int)mSignalledOutputEos,
++          (unsigned long long)work->input.ordinal.timestamp.peeku());
+     ALOGV("in buffer attr. size %zu timestamp %d frameindex %d, flags %x",
+           inSize, (int)work->input.ordinal.timestamp.peeku(),
+           (int)work->input.ordinal.frameIndex.peeku(), work->input.flags);
+@@ -875,6 +913,47 @@ void C2SoftAvcDec::process(
+             TIME_DIFF(mTimeStart, mTimeEnd, decodeTime);
+             ALOGV("decodeTime=%6d delay=%6d numBytes=%6d", decodeTime, delay,
+                   ps_decode_op->u4_num_bytes_consumed);
++
++            // Convert YV12 (in CPU buffer) -> RGBA_8888 (in graphic block) for display,
++            // because Tegra gralloc cannot allocate YUV buffers.
++            if (ps_decode_op->u4_output_present && mYuvCpuBuffer) {
++                uint32_t cpuStride = ALIGN32(mWidth);
++                size_t lumaSize = (size_t)cpuStride * mHeight;
++                size_t chromaSize = lumaSize >> 2;
++                const uint8_t *yPlane = mYuvCpuBuffer;
++                const uint8_t *uPlane = mYuvCpuBuffer + lumaSize;
++                const uint8_t *vPlane = mYuvCpuBuffer + lumaSize + chromaSize;
++                uint32_t cpuChromaStride = cpuStride / 2;
++
++                const uint8_t *const *planes = wView.data();
++                if (planes) {
++                    uint8_t *rgbaData = const_cast<uint8_t *>(planes[0]);
++                    int rowInc = wView.layout().planes[0].rowInc;
++                    uint32_t rgbaStride = (rowInc > 0) ? (uint32_t)(rowInc / 4) : mWidth;
++
++                    for (uint32_t y = 0; y < mHeight; y++) {
++                        const uint8_t *yRow = yPlane + y * cpuStride;
++                        const uint8_t *uRow = uPlane + (y >> 1) * cpuChromaStride;
++                        const uint8_t *vRow = vPlane + (y >> 1) * cpuChromaStride;
++                        uint8_t *dst = rgbaData + (size_t)y * rgbaStride * 4;
++                        for (uint32_t x = 0; x < mWidth; x++) {
++                            int Y = yRow[x];
++                            int U = uRow[x >> 1];
++                            int V = vRow[x >> 1];
++                            int r = Y + ((359 * (V - 128)) >> 8);
++                            int g = Y - ((88 * (U - 128) + 183 * (V - 128)) >> 8);
++                            int b = Y + ((453 * (U - 128)) >> 8);
++                            if (r < 0) r = 0; else if (r > 255) r = 255;
++                            if (g < 0) g = 0; else if (g > 255) g = 255;
++                            if (b < 0) b = 0; else if (b > 255) b = 255;
++                            dst[x * 4 + 0] = (uint8_t)r;
++                            dst[x * 4 + 1] = (uint8_t)g;
++                            dst[x * 4 + 2] = (uint8_t)b;
++                            dst[x * 4 + 3] = 255;
++                        }
++                    }
++                }
++            }
+         }
+         if (IVD_MEM_ALLOC_FAILED == (ps_decode_op->u4_error_code & IVD_ERROR_MASK)) {
+             ALOGE("allocation failure in decoder");
+@@ -1006,6 +1085,43 @@ c2_status_t C2SoftAvcDec::drainInternal(
+         }
+         (void) ivdec_api_function(mDecHandle, &s_h264d_decode_ip, &s_h264d_decode_op);
+         if (ps_decode_op->u4_output_present) {
++            // Convert YV12 (CPU buffer) -> RGBA_8888 (graphic block) for display.
++            if (mYuvCpuBuffer) {
++                uint32_t cpuStride = ALIGN32(mWidth);
++                size_t lumaSize = (size_t)cpuStride * mHeight;
++                size_t chromaSize = lumaSize >> 2;
++                const uint8_t *yPlane = mYuvCpuBuffer;
++                const uint8_t *uPlane = mYuvCpuBuffer + lumaSize;
++                const uint8_t *vPlane = mYuvCpuBuffer + lumaSize + chromaSize;
++                uint32_t cpuChromaStride = cpuStride / 2;
++                const uint8_t *const *planes = wView.data();
++                if (planes) {
++                    uint8_t *rgbaData = const_cast<uint8_t *>(planes[0]);
++                    int rowInc = wView.layout().planes[0].rowInc;
++                    uint32_t rgbaStride = (rowInc > 0) ? (uint32_t)(rowInc / 4) : mWidth;
++                    for (uint32_t y = 0; y < mHeight; y++) {
++                        const uint8_t *yRow = yPlane + y * cpuStride;
++                        const uint8_t *uRow = uPlane + (y >> 1) * cpuChromaStride;
++                        const uint8_t *vRow = vPlane + (y >> 1) * cpuChromaStride;
++                        uint8_t *dst = rgbaData + (size_t)y * rgbaStride * 4;
++                        for (uint32_t x = 0; x < mWidth; x++) {
++                            int Y = yRow[x];
++                            int U = uRow[x >> 1];
++                            int V = vRow[x >> 1];
++                            int r = Y + ((359 * (V - 128)) >> 8);
++                            int g = Y - ((88 * (U - 128) + 183 * (V - 128)) >> 8);
++                            int b = Y + ((453 * (U - 128)) >> 8);
++                            if (r < 0) r = 0; else if (r > 255) r = 255;
++                            if (g < 0) g = 0; else if (g > 255) g = 255;
++                            if (b < 0) b = 0; else if (b > 255) b = 255;
++                            dst[x * 4 + 0] = (uint8_t)r;
++                            dst[x * 4 + 1] = (uint8_t)g;
++                            dst[x * 4 + 2] = (uint8_t)b;
++                            dst[x * 4 + 3] = 255;
++                        }
++                    }
++                }
++            }
+             finishWork(ps_decode_op->u4_ts, work);
+         } else {
+             fillEmptyWork(work);
+diff --git a/media/codec2/components/avc/C2SoftAvcDec.h b/media/codec2/components/avc/C2SoftAvcDec.h
+index 5c07d29cbe..1a08339c4d 100644
+--- a/media/codec2/components/avc/C2SoftAvcDec.h
++++ b/media/codec2/components/avc/C2SoftAvcDec.h
+@@ -153,6 +153,10 @@ private:
+     iv_obj_t *mDecHandle;
+     std::shared_ptr<C2GraphicBlock> mOutBlock;
+     uint8_t *mOutBufferFlush;
++    // CPU YV12 scratch buffer: decoder writes YV12 here, then we convert to RGBA_8888
++    // and blit into the RGBA_8888 graphic block (Tegra gralloc cannot allocate YUV).
++    uint8_t *mYuvCpuBuffer;
++    size_t mYuvCpuBufferSize;
+ 
+     size_t mNumCores;
+     IV_COLOR_FORMAT_T mIvColorFormat;
+diff --git a/media/codec2/components/base/SimpleC2Component.cpp b/media/codec2/components/base/SimpleC2Component.cpp
+index 6c4b7d9355..a2637b3ece 100644
+--- a/media/codec2/components/base/SimpleC2Component.cpp
++++ b/media/codec2/components/base/SimpleC2Component.cpp
+@@ -455,6 +455,11 @@ bool SimpleC2Component::processQueue() {
+         work = queue->pop_front();
+         hasQueuedWork = !queue->empty();
+     }
++    if (work) {
++        ALOGD("DBG processQueue: frameIndex=%llu nbufs=%zu hasQueued=%d",
++                (unsigned long long)work->input.ordinal.frameIndex.peeku(),
++                work->input.buffers.size(), hasQueuedWork ? 1 : 0);
++    }
+     if (isFlushPending) {
+         ALOGV("processing pending flush");
+         c2_status_t err = onFlush_sm();
+diff --git a/media/codec2/sfplugin/CCodec.cpp b/media/codec2/sfplugin/CCodec.cpp
+index 82460c914b..a53f4bd703 100644
+--- a/media/codec2/sfplugin/CCodec.cpp
++++ b/media/codec2/sfplugin/CCodec.cpp
+@@ -2459,7 +2459,7 @@ void CCodec::initiateReleaseIfStuck() {
+         isMediaTypeKnown = (kKnownMediaTypes.count(config->mCodingMediaType) != 0);
+     }
+     if (!tunneled && isMediaTypeKnown && name.empty()) {
+-        constexpr std::chrono::steady_clock::duration kWorkDurationThreshold = 3s;
++        constexpr std::chrono::steady_clock::duration kWorkDurationThreshold = 60s;
+         std::chrono::steady_clock::duration elapsed = mChannel->elapsed();
+         if (elapsed >= kWorkDurationThreshold) {
+             name = "queue";
+diff --git a/media/codec2/sfplugin/CCodecBufferChannel.cpp b/media/codec2/sfplugin/CCodecBufferChannel.cpp
+index 951888b1b6..f15cb4ddd1 100644
+--- a/media/codec2/sfplugin/CCodecBufferChannel.cpp
++++ b/media/codec2/sfplugin/CCodecBufferChannel.cpp
+@@ -224,6 +224,8 @@ status_t CCodecBufferChannel::queueInputBufferInternal(
+         tunnelFirstFrame = true;
+     }
+     ALOGV("[%s] queueInputBuffer: buffer->size() = %zu", mName, buffer->size());
++    ALOGD("DBG queueInputBufferInternal: size=%zu timeUs=%lld eos=%d",
++            buffer->size(), (long long)timeUs, eos ? 1 : 0);
+     std::list<std::unique_ptr<C2Work>> items;
+     std::unique_ptr<C2Work> work(new C2Work);
+     work->input.ordinal.timestamp = timeUs;
+@@ -332,6 +334,8 @@ status_t CCodecBufferChannel::queueInputBufferInternal(
+             }
+         }
+         err = mComponent->queue(&items);
++        ALOGD("DBG queueInputBufferInternal: mComponent->queue err=%d size=%zu",
++                err, buffer->size());
+     }
+     if (err != C2_OK) {
+         Mutexed<PipelineWatcher>::Locked watcher(mPipelineWatcher);
+diff --git a/media/codec2/vndk/C2AllocatorGralloc.cpp b/media/codec2/vndk/C2AllocatorGralloc.cpp
+index 6a7f19cc2b..2099357e71 100644
+--- a/media/codec2/vndk/C2AllocatorGralloc.cpp
++++ b/media/codec2/vndk/C2AllocatorGralloc.cpp
+@@ -543,37 +543,34 @@ c2_status_t C2AllocationGralloc::map(
+         case static_cast<uint32_t>(PixelFormat4::YCBCR_420_888):
+             // fall-through
+         case static_cast<uint32_t>(PixelFormat4::YV12): {
+-            android_ycbcr ycbcrLayout;
+-
+-            status_t err = GraphicBufferMapper::get().lockYCbCr(
+-                    const_cast<native_handle_t*>(mBuffer), grallocUsage, rect, &ycbcrLayout);
++            // Tegra gralloc HAL (legacy) does not implement lockYCbCr/lock_flex.
++            // Use the generic lock() (known to work on this HAL, e.g. for the
++            // RGBA camera path) and compute the planar YUV420 layout manually.
++            void *pointer = nullptr;
++            status_t err = GraphicBufferMapper::get().lock(
++                    const_cast<native_handle_t *>(mBuffer), grallocUsage, rect, &pointer);
+             if (err) {
+-                ALOGE("failed transaction: lockYCbCr (err=%d)", err);
+-                return C2_CORRUPTED;
+-            }
+-            if (!ycbcrLayout.y || !ycbcrLayout.cb || !ycbcrLayout.cr
+-                    || ycbcrLayout.ystride == 0
+-                    || ycbcrLayout.cstride == 0
+-                    || ycbcrLayout.chroma_step == 0) {
+-                ALOGE("invalid layout: lockYCbCr (y=%s cb=%s cr=%s "
+-                        "ystride=%zu cstride=%zu chroma_step=%zu)",
+-                        ycbcrLayout.y ? "(non-null)" : "(null)",
+-                        ycbcrLayout.cb ? "(non-null)" : "(null)",
+-                        ycbcrLayout.cr ? "(non-null)" : "(null)",
+-                        ycbcrLayout.ystride, ycbcrLayout.cstride, ycbcrLayout.chroma_step);
++                ALOGE("failed transaction: lock(YCbCr)");
+                 return C2_CORRUPTED;
+             }
+ 
+-            addr[C2PlanarLayout::PLANE_Y] = (uint8_t *)ycbcrLayout.y;
+-            addr[C2PlanarLayout::PLANE_U] = (uint8_t *)ycbcrLayout.cb;
+-            addr[C2PlanarLayout::PLANE_V] = (uint8_t *)ycbcrLayout.cr;
++            const int32_t ystride = static_cast<int32_t>(mStride);
++            const int32_t cstride = ystride / 2; // planar: chroma stride == luma stride / 2
++            const int32_t height = static_cast<int32_t>(mHeight);
++            uint8_t *yPtr = static_cast<uint8_t*>(pointer);
++            uint8_t *uPtr = yPtr + ystride * height;
++            uint8_t *vPtr = uPtr + cstride * (height / 2);
++
++            addr[C2PlanarLayout::PLANE_Y] = yPtr;
++            addr[C2PlanarLayout::PLANE_U] = uPtr;
++            addr[C2PlanarLayout::PLANE_V] = vPtr;
+             layout->type = C2PlanarLayout::TYPE_YUV;
+             layout->numPlanes = 3;
+             layout->rootPlanes = 3;
+             layout->planes[C2PlanarLayout::PLANE_Y] = {
+                 C2PlaneInfo::CHANNEL_Y,         // channel
+                 1,                              // colInc
+-                (int32_t)ycbcrLayout.ystride,   // rowInc
++                ystride,                        // rowInc
+                 1,                              // mColSampling
+                 1,                              // mRowSampling
+                 8,                              // allocatedDepth
+@@ -584,42 +581,31 @@ c2_status_t C2AllocationGralloc::map(
+                 0,                              // offset
+             };
+             layout->planes[C2PlanarLayout::PLANE_U] = {
+-                C2PlaneInfo::CHANNEL_CB,          // channel
+-                (int32_t)ycbcrLayout.chroma_step, // colInc
+-                (int32_t)ycbcrLayout.cstride,     // rowInc
+-                2,                                // mColSampling
+-                2,                                // mRowSampling
+-                8,                                // allocatedDepth
+-                8,                                // bitDepth
+-                0,                                // rightShift
+-                C2PlaneInfo::NATIVE,              // endianness
+-                C2PlanarLayout::PLANE_U,          // rootIx
+-                0,                                // offset
++                C2PlaneInfo::CHANNEL_CB,        // channel
++                1,                              // colInc (planar)
++                cstride,                        // rowInc
++                2,                              // mColSampling
++                2,                              // mRowSampling
++                8,                              // allocatedDepth
++                8,                              // bitDepth
++                0,                              // rightShift
++                C2PlaneInfo::NATIVE,            // endianness
++                C2PlanarLayout::PLANE_U,        // rootIx
++                0,                              // offset
+             };
+             layout->planes[C2PlanarLayout::PLANE_V] = {
+-                C2PlaneInfo::CHANNEL_CR,          // channel
+-                (int32_t)ycbcrLayout.chroma_step, // colInc
+-                (int32_t)ycbcrLayout.cstride,     // rowInc
+-                2,                                // mColSampling
+-                2,                                // mRowSampling
+-                8,                                // allocatedDepth
+-                8,                                // bitDepth
+-                0,                                // rightShift
+-                C2PlaneInfo::NATIVE,              // endianness
+-                C2PlanarLayout::PLANE_V,          // rootIx
+-                0,                                // offset
++                C2PlaneInfo::CHANNEL_CR,        // channel
++                1,                              // colInc (planar)
++                cstride,                        // rowInc
++                2,                              // mColSampling
++                2,                              // mRowSampling
++                8,                              // allocatedDepth
++                8,                              // bitDepth
++                0,                              // rightShift
++                C2PlaneInfo::NATIVE,            // endianness
++                C2PlanarLayout::PLANE_V,        // rootIx
++                0,                              // offset
+             };
+-            // handle interleaved formats
+-            intptr_t uvOffset = addr[C2PlanarLayout::PLANE_V] - addr[C2PlanarLayout::PLANE_U];
+-            if (uvOffset > 0 && uvOffset < (intptr_t)ycbcrLayout.chroma_step) {
+-                layout->rootPlanes = 2;
+-                layout->planes[C2PlanarLayout::PLANE_V].rootIx = C2PlanarLayout::PLANE_U;
+-                layout->planes[C2PlanarLayout::PLANE_V].offset = uvOffset;
+-            } else if (uvOffset < 0 && uvOffset > -(intptr_t)ycbcrLayout.chroma_step) {
+-                layout->rootPlanes = 2;
+-                layout->planes[C2PlanarLayout::PLANE_U].rootIx = C2PlanarLayout::PLANE_V;
+-                layout->planes[C2PlanarLayout::PLANE_U].offset = -uvOffset;
+-            }
+             break;
+         }
+ 
+diff --git a/media/libaudiohal/FactoryHalHidl.cpp b/media/libaudiohal/FactoryHalHidl.cpp
+index 7228b221b9..5d59ade5c0 100644
+--- a/media/libaudiohal/FactoryHalHidl.cpp
++++ b/media/libaudiohal/FactoryHalHidl.cpp
+@@ -95,13 +95,21 @@ bool hasHalService(const std::string& package, const std::string& version,
+ }  // namespace
+ 
+ void* createPreferredImpl(const std::string& package, const std::string& interface) {
+-    for (auto version = detail::sAudioHALVersions; version != nullptr; ++version) {
++    for (auto version = detail::sAudioHALVersions; *version != nullptr; ++version) {
+         void* rawInterface = nullptr;
+         if (hasHalService(package, *version, interface)
+                 && createHalService(*version, interface, &rawInterface)) {
+             return rawInterface;
+         }
+     }
++    // No HIDL audio HAL service is registered. Fall back to the in-process
++    // (legacy) audio HAL by creating the factory from the highest-preferred
++    // version library; the hybrid factory routes to the local HAL when no
++    // HIDL service is present.
++    void* rawInterface = nullptr;
++    if (createHalService(detail::sAudioHALVersions[0], interface, &rawInterface)) {
++        return rawInterface;
++    }
+     return nullptr;
+ }
+ 
+diff --git a/media/libaudiohal/impl/DevicesFactoryHalHybrid.cpp b/media/libaudiohal/impl/DevicesFactoryHalHybrid.cpp
+index cde8d85e87..38128e152b 100644
+--- a/media/libaudiohal/impl/DevicesFactoryHalHybrid.cpp
++++ b/media/libaudiohal/impl/DevicesFactoryHalHybrid.cpp
+@@ -26,7 +26,7 @@ namespace CPP_VERSION {
+ 
+ DevicesFactoryHalHybrid::DevicesFactoryHalHybrid(sp<IDevicesFactory> hidlFactory)
+         : mLocalFactory(new DevicesFactoryHalLocal()),
+-          mHidlFactory(new DevicesFactoryHalHidl(hidlFactory)) {
++          mHidlFactory(hidlFactory != 0 ? new DevicesFactoryHalHidl(hidlFactory) : nullptr) {
+ }
+ 
+ status_t DevicesFactoryHalHybrid::openDevice(const char *name, sp<DeviceHalInterface> *device) {
+@@ -55,7 +55,10 @@ status_t DevicesFactoryHalHybrid::setCallbackOnce(sp<DevicesFactoryHalCallback>
+ 
+ extern "C" __attribute__((visibility("default"))) void* createIDevicesFactory() {
+     auto service = hardware::audio::CPP_VERSION::IDevicesFactory::getService();
+-    return service ? new CPP_VERSION::DevicesFactoryHalHybrid(service) : nullptr;
++    // Always create the hybrid factory. When no HIDL audio HAL service is
++    // registered (service == nullptr), the hybrid factory routes all devices
++    // to the in-process (legacy) audio HAL.
++    return new CPP_VERSION::DevicesFactoryHalHybrid(service);
+ }
+ 
+ } // namespace android
+diff --git a/media/libmediaplayerservice/StagefrightRecorder.cpp b/media/libmediaplayerservice/StagefrightRecorder.cpp
+index d72b0b2332..e8cdeace07 100644
+--- a/media/libmediaplayerservice/StagefrightRecorder.cpp
++++ b/media/libmediaplayerservice/StagefrightRecorder.cpp
+@@ -16,6 +16,7 @@
+ 
+ //#define LOG_NDEBUG 0
+ #define LOG_TAG "StagefrightRecorder"
++#include <cutils/properties.h>
+ #include <inttypes.h>
+ // TODO/workaround: including base logging now as it conflicts with ADebug.h
+ // and it must be included first.
+@@ -1219,10 +1220,13 @@ status_t StagefrightRecorder::start() {
+     }
+ 
+     status_t status = OK;
++    ALOGW("MOCHA-REC: start() fd=%d videoSource=%d audioSource=%d",
++          mOutputFd, mVideoSource, mAudioSource);
+ 
+     if (mVideoSource != VIDEO_SOURCE_SURFACE) {
+         status = prepareInternal();
+         if (status != OK) {
++            ALOGE("MOCHA-REC: prepareInternal failed %d", status);
+             return status;
+         }
+     }
+@@ -1245,6 +1249,22 @@ status_t StagefrightRecorder::start() {
+             sp<MetaData> meta = new MetaData;
+             setupMPEG4orWEBMMetaData(&meta);
+             status = mWriter->start(meta.get());
++            if (status != OK && mVideoSource == VIDEO_SOURCE_SURFACE &&
++                    property_get_bool("media.stagefright.video_only_fallback", false)) {
++                // Tegra K1: microphone capture may be non-functional; retry as
++                // video-only recording when the mixed audio+video start fails.
++                ALOGW("writer->start failed (%d), retrying as video-only recording", status);
++                mWriter.clear();
++                mWriter = NULL;
++                mAudioSource = (audio_source_t)AUDIO_SOURCE_CNT;
++                mAudioEncoderSource.clear();
++                status = prepareInternal();
++                if (status == OK) {
++                    sp<MetaData> retryMeta = new MetaData;
++                    setupMPEG4orWEBMMetaData(&retryMeta);
++                    status = mWriter->start(retryMeta.get());
++                }
++            }
+             break;
+         }
+ 
+@@ -2167,12 +2187,14 @@ status_t StagefrightRecorder::setupMPEG4orWEBMRecording() {
+ 
+         sp<MediaSource> mediaSource;
+         err = setupMediaSource(&mediaSource);
++        ALOGW("MOCHA-REC: setupMediaSource err=%d", err);
+         if (err != OK) {
+             return err;
+         }
+ 
+         sp<MediaCodecSource> encoder;
+         err = setupVideoEncoder(mediaSource, &encoder);
++        ALOGW("MOCHA-REC: setupVideoEncoder err=%d", err);
+         if (err != OK) {
+             return err;
+         }
+@@ -2189,6 +2211,12 @@ status_t StagefrightRecorder::setupMPEG4orWEBMRecording() {
+     const bool disableAudio = mCaptureFpsEnable && mCaptureFps < mFrameRate;
+     if (!disableAudio && mAudioSource != AUDIO_SOURCE_CNT) {
+         err = setupAudioEncoder(writer);
++        if (err != OK && property_get_bool("media.stagefright.video_only_fallback", false)) {
++            // Tegra K1: microphone capture path may be unavailable; allow
++            // video-only recording instead of failing outright.
++            ALOGW("setupAudioEncoder failed (%d), continuing with video-only recording", err);
++            err = OK;
++        }
+         if (err != OK) return err;
+         mTotalBitRate += mAudioBitRate;
+     }
+diff --git a/media/libmediaplayerservice/nuplayer/GenericSource.cpp b/media/libmediaplayerservice/nuplayer/GenericSource.cpp
+index 439dbe8eb7..e241777030 100644
+--- a/media/libmediaplayerservice/nuplayer/GenericSource.cpp
++++ b/media/libmediaplayerservice/nuplayer/GenericSource.cpp
+@@ -1385,6 +1385,8 @@ void NuPlayer::GenericSource::readBuffer(
+             }
+         }
+         mLock.lock();
++        ALOGD("DBG readBuffer: track=%d err=%d count=%zu",
++              (int)trackType, err, mediaBuffers.size());
+ 
+         options.clearNonPersistent();
+ 
+@@ -1402,6 +1404,7 @@ void NuPlayer::GenericSource::readBuffer(
+         for (; id < count; ++id) {
+             int64_t timeUs;
+             MediaBufferBase *mbuf = mediaBuffers[id];
++            ALOGD("DBG readBuffer: buf[%zu] size=%zu", id, mbuf->size());
+             if (!mbuf->meta_data().findInt64(kKeyTime, &timeUs)) {
+                 mbuf->meta_data().dumpToLog();
+                 track->mPackets->signalEOS(ERROR_MALFORMED);
+diff --git a/media/libmediaplayerservice/nuplayer/NuPlayerDecoder.cpp b/media/libmediaplayerservice/nuplayer/NuPlayerDecoder.cpp
+index 2c1f158eda..1bcbb27f9c 100644
+--- a/media/libmediaplayerservice/nuplayer/NuPlayerDecoder.cpp
++++ b/media/libmediaplayerservice/nuplayer/NuPlayerDecoder.cpp
+@@ -565,6 +565,8 @@ void NuPlayer::Decoder::onShutdown(bool notifyComplete) {
+  * returns true if we should request more data
+  */
+ bool NuPlayer::Decoder::doRequestBuffers() {
++    ALOGD("DBG doRequestBuffers: pendingInput=%zu discPending=%d",
++            mDequeuedInputBuffers.size(), isDiscontinuityPending() ? 1 : 0);
+     if (isDiscontinuityPending()) {
+         return false;
+     }
+@@ -574,6 +576,7 @@ bool NuPlayer::Decoder::doRequestBuffers() {
+         sp<AMessage> msg = new AMessage();
+         msg->setSize("buffer-ix", bufferIx);
+         err = fetchInputData(msg);
++        ALOGD("DBG doRequestBuffers: fetchInputData err=%d bufferIx=%zu", err, bufferIx);
+         if (err != OK && err != ERROR_END_OF_STREAM) {
+             // if EOS, need to queue EOS buffer
+             break;
+@@ -879,6 +882,8 @@ status_t NuPlayer::Decoder::fetchInputData(sp<AMessage> &reply) {
+     bool dropAccessUnit = true;
+     do {
+         status_t err = mSource->dequeueAccessUnit(mIsAudio, &accessUnit);
++        ALOGD("DBG fetchInputData: dequeueAccessUnit err=%d size=%zu",
++                err, (accessUnit != NULL) ? accessUnit->size() : 0);
+ 
+         if (err == -EWOULDBLOCK) {
+             return err;
+@@ -1127,6 +1132,8 @@ bool NuPlayer::Decoder::onInputBufferFetched(const sp<AMessage> &msg) {
+ 
+         status_t err;
+         AString errorDetailMsg;
++        ALOGD("DBG onInputBufferFetched: queueInputBuffer bufferIx=%zu size=%zu timeUs=%lld flags=0x%x",
++                bufferIx, codecBuffer->size(), (long long)timeUs, flags);
+         if (cryptInfo != NULL) {
+             err = mCodec->queueSecureInputBuffer(
+                     bufferIx,
+diff --git a/media/libstagefright/CameraSource.cpp b/media/libstagefright/CameraSource.cpp
+index 08b618384b..aaefc7784c 100644
+--- a/media/libstagefright/CameraSource.cpp
++++ b/media/libstagefright/CameraSource.cpp
+@@ -366,29 +366,49 @@ static int32_t getHighSpeedFrameRate(const CameraParameters& params) {
+  */
+ status_t CameraSource::configureCamera(
+         CameraParameters* params,
+-        int32_t width, int32_t height,
++        int32_t* width, int32_t* height,
+         int32_t frameRate) {
+     ALOGV("configureCamera");
+     Vector<Size> sizes;
+     bool isSetVideoSizeSupportedByCamera = true;
+     getSupportedVideoSizes(*params, &isSetVideoSizeSupportedByCamera, sizes);
+     bool isCameraParamChanged = false;
+-    if (width != -1 && height != -1) {
+-        if (!isVideoSizeSupported(width, height, sizes)) {
+-            ALOGE("Video dimension (%dx%d) is unsupported", width, height);
+-            return BAD_VALUE;
++    if (*width != -1 && *height != -1) {
++        if (!isVideoSizeSupported(*width, *height, sizes)) {
++            // Mocha: fall back to the largest supported video size instead of
++            // failing, so recording works when the app requests a size the
++            // sensor cannot produce (e.g. 1080p on a 720p sensor).
++            Size best;
++            bool found = false;
++            for (size_t i = 0; i < sizes.size(); ++i) {
++                if (!found ||
++                    (static_cast<int64_t>(sizes[i].width) * sizes[i].height >
++                     static_cast<int64_t>(best.width) * best.height)) {
++                    best = sizes[i];
++                    found = true;
++                }
++            }
++            if (found) {
++                ALOGW("Video dimension (%dx%d) unsupported, falling back to %dx%d",
++                      *width, *height, best.width, best.height);
++                *width = best.width;
++                *height = best.height;
++            } else {
++                ALOGE("Video dimension (%dx%d) is unsupported", *width, *height);
++                return BAD_VALUE;
++            }
+         }
+         if (isSetVideoSizeSupportedByCamera) {
+-            params->setVideoSize(width, height);
++            params->setVideoSize(*width, *height);
+         } else {
+-            params->setPreviewSize(width, height);
++            params->setPreviewSize(*width, *height);
+         }
+         isCameraParamChanged = true;
+-    } else if ((width == -1 && height != -1) ||
+-               (width != -1 && height == -1)) {
++    } else if ((*width == -1 && *height != -1) ||
++               (*width != -1 && *height == -1)) {
+         // If one and only one of the width and height is -1
+         // we reject such a request.
+-        ALOGE("Requested video size (%dx%d) is not supported", width, height);
++        ALOGE("Requested video size (%dx%d) is not supported", *width, *height);
+         return BAD_VALUE;
+     } else {  // width == -1 && height == -1
+         // Do not configure the camera.
+@@ -659,9 +679,10 @@ status_t CameraSource::initWithCameraAccess(
+     }
+ 
+     // Set the camera to use the requested video frame size
+-    // and/or frame rate.
++    // and/or frame rate. configureCamera may update videoSize to the largest
++    // supported size when the requested one is not supported by the sensor.
+     if ((err = configureCamera(&params,
+-                    videoSize.width, videoSize.height,
++                    &videoSize.width, &videoSize.height,
+                     frameRate))) {
+         return err;
+     }
+@@ -1129,6 +1150,11 @@ status_t CameraSource::read(
+         //       Either document why it is safe in this case or address the
+         //       issue (e.g. by copying).
+         *buffer = new MediaBuffer(frame->unsecurePointer(), frame->size());
++        {
++            VideoNativeMetadata *p = (VideoNativeMetadata *)frame->unsecurePointer();
++            ALOGE("MOCHA-REC read: frame=%p size=%u pBuffer=%p eType=%d",
++                frame->unsecurePointer(), (unsigned)frame->size(), p->pBuffer, (int)p->eType);
++        }
+         (*buffer)->setObserver(this);
+         (*buffer)->add_ref();
+         (*buffer)->meta_data().setInt64(kKeyTime, frameTime);
+@@ -1423,8 +1449,13 @@ void CameraSource::processBufferQueueFrame(BufferItem& buffer) {
+         (uint8_t*)heap->getBase() + offset);
+     memset(payload, 0, sizeof(VideoNativeMetadata));
+     payload->eType = kMetadataBufferTypeANWBuffer;
+-    payload->pBuffer = buffer.mGraphicBuffer->getNativeBuffer();
++    payload->pBuffer = buffer.mGraphicBuffer ? buffer.mGraphicBuffer->getNativeBuffer() : nullptr;
+     payload->nFenceFd = -1;
++    ALOGE("MOCHA-REC processBufferQueueFrame: mGraphicBuffer=%p payload=%p pBuffer=%p eType=%d w=%d h=%d fmt=%d",
++        buffer.mGraphicBuffer.get(), payload, payload->pBuffer, (int)payload->eType,
++        buffer.mGraphicBuffer ? buffer.mGraphicBuffer->getWidth() : 0,
++        buffer.mGraphicBuffer ? buffer.mGraphicBuffer->getHeight() : 0,
++        buffer.mGraphicBuffer ? (int)buffer.mGraphicBuffer->getPixelFormat() : 0);
+ 
+     // Add the mapping so we can find the corresponding buffer item to release to the buffer queue
+     // when the encoder returns the native window buffer.
+diff --git a/media/libstagefright/MediaCodecSource.cpp b/media/libstagefright/MediaCodecSource.cpp
+index 0107c322cd..0b8a2846d1 100644
+--- a/media/libstagefright/MediaCodecSource.cpp
++++ b/media/libstagefright/MediaCodecSource.cpp
+@@ -39,6 +39,8 @@
+ #include <media/stagefright/MediaErrors.h>
+ #include <media/stagefright/MetaData.h>
+ #include <media/stagefright/Utils.h>
++#include <media/hardware/MetadataBufferType.h>
++#include <media/hardware/HardwareAPI.h>
+ 
+ namespace android {
+ 
+@@ -599,6 +601,13 @@ status_t MediaCodecSource::initEncoder() {
+         } else {
+             mEncoderFormat = kDefaultHwVideoEncoderFormat;
+         }
++        // Mocha (Tegra K1): the NVIDIA Tegra gralloc cannot allocate/lock
++        // YCbCr_420_888 buffers for CPU read (SW_READ_OFTEN). The camera HAL
++        // produces RGBA_8888 anyway, so use RGBA_8888 buffers (which the gralloc
++        // supports for CPU read) and let the encoder convert RGBA -> YUV.
++        if (mEncoderFormat == HAL_PIXEL_FORMAT_YCbCr_420_888) {
++            mEncoderFormat = HAL_PIXEL_FORMAT_RGBA_8888;
++        }
+         if (!inputFormat->findInt32("android._dataspace", &mEncoderDataSpace)) {
+             mEncoderDataSpace = kDefaultVideoEncoderDataSpace;
+         }
+diff --git a/media/libstagefright/colorconversion/SoftwareRenderer.cpp b/media/libstagefright/colorconversion/SoftwareRenderer.cpp
+index 4711315615..e01b96950e 100644
+--- a/media/libstagefright/colorconversion/SoftwareRenderer.cpp
++++ b/media/libstagefright/colorconversion/SoftwareRenderer.cpp
+@@ -19,6 +19,7 @@
+ 
+ #include "../include/SoftwareRenderer.h"
+ #include <cutils/properties.h> // for property_get
++#include <string.h>
+ #include <media/stagefright/foundation/ADebug.h>
+ #include <media/stagefright/foundation/AMessage.h>
+ #include <media/stagefright/foundation/ColorUtils.h>
+@@ -31,14 +32,9 @@
+ 
+ namespace android {
+ 
+-inline void initDstYUV(
+-        const android_ycbcr &ycbcr, int32_t cropTop, int32_t cropLeft,
+-        uint8_t **dst_y, uint8_t **dst_u, uint8_t **dst_v) {
+-    *dst_y = (uint8_t *)ycbcr.y + cropTop * ycbcr.ystride + cropLeft;
+-
+-    int32_t c_offset = (cropTop / 2) * ycbcr.cstride + cropLeft / 2;
+-    *dst_v = (uint8_t *)ycbcr.cr + c_offset;
+-    *dst_u = (uint8_t *)ycbcr.cb + c_offset;
++static int ALIGN(int x, int y) {
++    // y must be a power of 2.
++    return (x + y - 1) & ~(y - 1);
+ }
+ 
+ SoftwareRenderer::SoftwareRenderer(
+@@ -127,6 +123,14 @@ void SoftwareRenderer::resetFormatIfChanged(
+     size_t bufWidth = mCropWidth;
+     size_t bufHeight = mCropHeight;
+ 
++    // Tegra VIC converts YUV buffers through its blit pipeline; the
++    // DdkVicLockSurface path fails to acquire fences (error 0x3000f) with
++    // software-decoder output, yielding corrupted (purple) frames. On Tegra
++    // boards, convert YUV to RGBA in the ColorConverter instead.
++    char platform[PROPERTY_VALUE_MAX] = {0};
++    property_get("ro.board.platform", platform, "");
++    bool tegraRgbaOutput = (strcmp(platform, "tegra") == 0);
++
+     // hardware has YUV12 and RGBA8888 support, so convert known formats
+     {
+         switch (mColorFormat) {
+@@ -134,7 +138,11 @@ void SoftwareRenderer::resetFormatIfChanged(
+             case OMX_COLOR_FormatYUV420SemiPlanar:
+             case OMX_TI_COLOR_FormatYUV420PackedSemiPlanar:
+             {
+-                halFormat = HAL_PIXEL_FORMAT_YV12;
++                if (tegraRgbaOutput) {
++                    halFormat = HAL_PIXEL_FORMAT_RGBA_8888;
++                } else {
++                    halFormat = HAL_PIXEL_FORMAT_YV12;
++                }
+                 bufWidth = (mCropWidth + 1) & ~1;
+                 bufHeight = (mCropHeight + 1) & ~1;
+                 break;
+@@ -181,6 +189,10 @@ void SoftwareRenderer::resetFormatIfChanged(
+         mConverter = new ColorConverter(
+                 mColorFormat, OMX_COLOR_Format16bitRGB565);
+         CHECK(mConverter->isValid());
++    } else if (halFormat == HAL_PIXEL_FORMAT_RGBA_8888) {
++        mConverter = new ColorConverter(
++                mColorFormat, OMX_COLOR_Format32BitRGBA8888);
++        CHECK(mConverter->isValid());
+     } else if (halFormat == HAL_PIXEL_FORMAT_RGBA_1010102) {
+         mConverter = new ColorConverter(
+                 mColorFormat, OMX_COLOR_FormatYUV444Y410);
+@@ -274,21 +286,10 @@ std::list<FrameRenderTracker::Info> SoftwareRenderer::render(
+ 
+     Rect bounds(mCropWidth, mCropHeight);
+ 
+-    void *dst = NULL;
+-    struct android_ycbcr ycbcr;
+-    if ( !mConverter &&
+-         (mColorFormat == OMX_COLOR_FormatYUV420Planar ||
+-         mColorFormat == OMX_COLOR_FormatYUV420SemiPlanar ||
+-         mColorFormat == OMX_TI_COLOR_FormatYUV420PackedSemiPlanar ||
+-         mColorFormat == OMX_COLOR_FormatYUV420Planar16)) {
+-        CHECK_EQ(0, mapper.lockYCbCr(buf->handle,
+-                GRALLOC_USAGE_SW_READ_NEVER | GRALLOC_USAGE_SW_WRITE_RARELY,
+-                bounds, &ycbcr));
+-    } else {
+-        CHECK_EQ(0, mapper.lock(buf->handle,
+-                GRALLOC_USAGE_SW_READ_NEVER | GRALLOC_USAGE_SW_WRITE_RARELY,
+-                bounds, &dst));
+-    }
++    void *dst;
++    CHECK_EQ(0, mapper.lock(buf->handle,
++            GRALLOC_USAGE_SW_READ_NEVER | GRALLOC_USAGE_SW_WRITE_RARELY,
++            bounds, &dst));
+ 
+     // TODO move the other conversions also into ColorConverter, and
+     // fix cropping issues (when mCropLeft/Top != 0 or mWidth != mCropWidth)
+@@ -304,83 +305,88 @@ std::list<FrameRenderTracker::Info> SoftwareRenderer::render(
+         const uint8_t *src_y = (const uint8_t *)data + mCropTop * mStride + mCropLeft;
+         const uint8_t *src_u = (const uint8_t *)data + mStride * mHeight + mCropTop * mStride / 4;
+         const uint8_t *src_v = (const uint8_t *)src_u + mStride * mHeight / 4;
+-
+-        uint8_t *dst_y, *dst_u, *dst_v;
+-        initDstYUV(ycbcr, mCropTop, mCropLeft, &dst_y, &dst_u, &dst_v);
+-
++        uint8_t *dst_y = (uint8_t *)dst;
++        size_t dst_y_size = buf->stride * buf->height;
++        size_t dst_c_stride = ALIGN(buf->stride / 2, 16);
++        size_t dst_c_size = dst_c_stride * buf->height / 2;
++        uint8_t *dst_v = dst_y + dst_y_size;
++        uint8_t *dst_u = dst_v + dst_c_size;
++        dst_y += mCropTop * buf->stride + mCropLeft;
++        dst_v += (mCropTop/2) * dst_c_stride + mCropLeft/2;
++        dst_u += (mCropTop/2) * dst_c_stride + mCropLeft/2;
+         for (int y = 0; y < mCropHeight; ++y) {
+             memcpy(dst_y, src_y, mCropWidth);
+-
+             src_y += mStride;
+-            dst_y += ycbcr.ystride;
++            dst_y += buf->stride;
+         }
+-
+         for (int y = 0; y < (mCropHeight + 1) / 2; ++y) {
+             memcpy(dst_u, src_u, (mCropWidth + 1) / 2);
+             memcpy(dst_v, src_v, (mCropWidth + 1) / 2);
+-
+             src_u += mStride / 2;
+             src_v += mStride / 2;
+-            dst_u += ycbcr.cstride;
+-            dst_v += ycbcr.cstride;
++            dst_u += dst_c_stride;
++            dst_v += dst_c_stride;
+         }
+     } else if (mColorFormat == OMX_COLOR_FormatYUV420Planar16) {
+         const uint8_t *src_y = (const uint8_t *)data + mCropTop * mStride + mCropLeft * 2;
+         const uint8_t *src_u = (const uint8_t *)data + mStride * mHeight + mCropTop * mStride / 4;
+         const uint8_t *src_v = (const uint8_t *)src_u + mStride * mHeight / 4;
+-
+-        uint8_t *dst_y, *dst_u, *dst_v;
+-        initDstYUV(ycbcr, mCropTop, mCropLeft, &dst_y, &dst_u, &dst_v);
+-
++        uint8_t *dst_y = (uint8_t *)dst;
++        size_t dst_y_size = buf->stride * buf->height;
++        size_t dst_c_stride = ALIGN(buf->stride / 2, 16);
++        size_t dst_c_size = dst_c_stride * buf->height / 2;
++        uint8_t *dst_v = dst_y + dst_y_size;
++        uint8_t *dst_u = dst_v + dst_c_size;
++        dst_y += mCropTop * buf->stride + mCropLeft;
++        dst_v += (mCropTop / 2) * dst_c_stride + mCropLeft / 2;
++        dst_u += (mCropTop / 2) * dst_c_stride + mCropLeft / 2;
+         for (int y = 0; y < mCropHeight; ++y) {
+             for (int x = 0; x < mCropWidth; ++x) {
+                 dst_y[x] = (uint8_t)(((uint16_t *)src_y)[x] >> 2);
+             }
+-
+             src_y += mStride;
+-            dst_y += ycbcr.ystride;
++            dst_y += buf->stride;
+         }
+-
+         for (int y = 0; y < (mCropHeight + 1) / 2; ++y) {
+             for (int x = 0; x < (mCropWidth + 1) / 2; ++x) {
+                 dst_u[x] = (uint8_t)(((uint16_t *)src_u)[x] >> 2);
+                 dst_v[x] = (uint8_t)(((uint16_t *)src_v)[x] >> 2);
+             }
+-
+             src_u += mStride / 2;
+             src_v += mStride / 2;
+-            dst_u += ycbcr.cstride;
+-            dst_v += ycbcr.cstride;
++            dst_u += dst_c_stride;
++            dst_v += dst_c_stride;
+         }
+     } else if (mColorFormat == OMX_TI_COLOR_FormatYUV420PackedSemiPlanar
+             || mColorFormat == OMX_COLOR_FormatYUV420SemiPlanar) {
+         const uint8_t *src_y = (const uint8_t *)data;
+         const uint8_t *src_uv = (const uint8_t *)data
+                 + mWidth * mHeight;
+-
+         src_y += mCropLeft + mCropTop * mWidth;
+         src_uv += (mCropLeft + mCropTop * mWidth) / 2;
+-
+-        uint8_t *dst_y, *dst_u, *dst_v;
+-        initDstYUV(ycbcr, mCropTop, mCropLeft, &dst_y, &dst_u, &dst_v);
+-
++        uint8_t *dst_y = (uint8_t *)dst;
++        size_t dst_y_size = buf->stride * buf->height;
++        size_t dst_c_stride = ALIGN(buf->stride / 2, 16);
++        size_t dst_c_size = dst_c_stride * buf->height / 2;
++        uint8_t *dst_v = dst_y + dst_y_size;
++        uint8_t *dst_u = dst_v + dst_c_size;
++        dst_y += mCropTop * buf->stride + mCropLeft;
++        dst_v += (mCropTop/2) * dst_c_stride + mCropLeft/2;
++        dst_u += (mCropTop/2) * dst_c_stride + mCropLeft/2;
+         for (int y = 0; y < mCropHeight; ++y) {
+             memcpy(dst_y, src_y, mCropWidth);
+-
+             src_y += mWidth;
+-            dst_y += ycbcr.ystride;
++            dst_y += buf->stride;
+         }
+-
+         for (int y = 0; y < (mCropHeight + 1) / 2; ++y) {
+             size_t tmp = (mCropWidth + 1) / 2;
+             for (size_t x = 0; x < tmp; ++x) {
+                 dst_u[x] = src_uv[2 * x];
+                 dst_v[x] = src_uv[2 * x + 1];
+             }
+-
+             src_uv += mWidth;
+-            dst_u += ycbcr.cstride;
+-            dst_v += ycbcr.cstride;
++            dst_u += dst_c_stride;
++            dst_v += dst_c_stride;
+         }
+     } else if (mColorFormat == OMX_COLOR_Format24bitRGB888) {
+         uint8_t* srcPtr = (uint8_t*)data + mWidth * mCropTop * 3 + mCropLeft * 3;
+diff --git a/media/libstagefright/include/media/stagefright/CameraSource.h b/media/libstagefright/include/media/stagefright/CameraSource.h
+index efdfa02be5..6f6e5c4f0d 100644
+--- a/media/libstagefright/include/media/stagefright/CameraSource.h
++++ b/media/libstagefright/include/media/stagefright/CameraSource.h
+@@ -318,7 +318,7 @@ private:
+ 
+     status_t isCameraColorFormatSupported(const CameraParameters& params);
+     status_t configureCamera(CameraParameters* params,
+-                    int32_t width, int32_t height,
++                    int32_t* width, int32_t* height,
+                     int32_t frameRate);
+ 
+     status_t checkVideoSize(const CameraParameters& params,
+diff --git a/services/audioflinger/AudioFlinger.cpp b/services/audioflinger/AudioFlinger.cpp
+index 1dd41b337b..0d6abc7581 100644
+--- a/services/audioflinger/AudioFlinger.cpp
++++ b/services/audioflinger/AudioFlinger.cpp
+@@ -267,8 +267,12 @@ AudioFlinger::AudioFlinger()
+ 
+     mMediaLogNotifier->run("MediaLogNotifier");
+     std::vector<pid_t> halPids;
+-    mDevicesFactoryHal->getHalPids(&halPids);
+-    TimeCheck::setAudioHalPids(halPids);
++    if (mDevicesFactoryHal != 0) {
++        mDevicesFactoryHal->getHalPids(&halPids);
++        TimeCheck::setAudioHalPids(halPids);
++    } else {
++        ALOGW("Audio HAL devices factory unavailable; continuing without audio HAL pids");
++    }
+ 
+     // Notify that we have started (also called when audioserver service restarts)
+     mediametrics::LogItem(mMetricsId)
+@@ -299,7 +303,9 @@ void AudioFlinger::onFirstRef()
+     gAudioFlinger = this;  // we are already refcounted, store into atomic pointer.
+ 
+     mDevicesFactoryHalCallback = new DevicesFactoryHalCallbackImpl;
+-    mDevicesFactoryHal->setCallbackOnce(mDevicesFactoryHalCallback);
++    if (mDevicesFactoryHal != 0) {
++        mDevicesFactoryHal->setCallbackOnce(mDevicesFactoryHalCallback);
++    }
+ }
+ 
+ status_t AudioFlinger::setAudioHalPids(const std::vector<pid_t>& pids) {
+@@ -2240,6 +2246,10 @@ audio_module_handle_t AudioFlinger::loadHwModule_l(const char *name)
+ 
+     sp<DeviceHalInterface> dev;
+ 
++    if (mDevicesFactoryHal == 0) {
++        ALOGE("loadHwModule() audio HAL devices factory unavailable; cannot load module %s", name);
++        return AUDIO_MODULE_HANDLE_NONE;
++    }
+     int rc = mDevicesFactoryHal->openDevice(name, &dev);
+     if (rc) {
+         ALOGE("loadHwModule() error %d loading module %s", rc, name);
+diff --git a/services/camera/libcameraservice/device3/Camera3Device.cpp b/services/camera/libcameraservice/device3/Camera3Device.cpp
+index 8f080bec87..7e92c3290a 100644
+--- a/services/camera/libcameraservice/device3/Camera3Device.cpp
++++ b/services/camera/libcameraservice/device3/Camera3Device.cpp
+@@ -3521,14 +3521,25 @@ status_t Camera3Device::HalInterface::configureStreams(const camera_metadata_t *
+ 
+         if (dstStream->getOriginalFormat() != HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED) {
+             dstStream->setFormatOverride(false);
+-            dstStream->setDataSpaceOverride(false);
+             if (dst->format != overrideFormat) {
+                 ALOGE("%s: Stream %d: Format override not allowed for format 0x%x", __FUNCTION__,
+                         streamId, dst->format);
+             }
+-            if (dst->data_space != overrideDataSpace) {
+-                ALOGE("%s: Stream %d: DataSpace override not allowed for format 0x%x", __FUNCTION__,
+-                        streamId, dst->format);
++            if (dst->format == HAL_PIXEL_FORMAT_BLOB &&
++                    dst->data_space != overrideDataSpace) {
++                // Legacy HAL quirk: accept dataspace override for BLOB outputs.
++                dstStream->setDataSpaceOverride(true);
++                ALOGI("%s: Stream %d: accepting BLOB dataspace override %d -> %d",
++                        __FUNCTION__, streamId,
++                        static_cast<int>(dst->data_space),
++                        static_cast<int>(overrideDataSpace));
++                dst->data_space = overrideDataSpace;
++            } else {
++                dstStream->setDataSpaceOverride(false);
++                if (dst->data_space != overrideDataSpace) {
++                    ALOGE("%s: Stream %d: DataSpace override not allowed for format 0x%x",
++                            __FUNCTION__, streamId, dst->format);
++                }
+             }
+         } else {
+             bool needFormatOverride =

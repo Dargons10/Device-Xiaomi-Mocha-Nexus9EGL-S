@@ -1,31 +1,49 @@
 #!/bin/sh
+# Aplica el registro de parches de plataforma sobre el arbol (orden numerico, porque hay
+# parches encadenados que dependen del orden). Idempotente: un parche ya aplicado se
+# reconoce con 'git apply --check -R' y se salta. Los conjuntos '*.disabled' se ignoran.
+#
+# Uso:  sh device/xiaomi/mocha/patches/install.sh      (desde cualquier directorio)
+# Codigo de salida != 0 si algun parche no aplica ni directo ni inverso.
 
-echo $1
-rootdirectory="$PWD"
-# ---------------------------------
+. "$(cd "$(dirname "$0")" && pwd)/registry_lib.sh"
 
-dirs="bionic/libm frameworks/native frameworks/av frameworks/base hardware/interfaces hardware/lineage/interfaces system/extras system/core system/libhidl packages/apps/Camera2 packages/apps/Gallery2 packages/apps/Settings packages/apps/Trebuchet external/dng_sdk lineage-sdk hardware/broadcom/wlan hardware/broadcom/fm hardware/broadcom/libbt system/memory/lmkd system/netd system/connectivity/wificond system/sepolicy system/bt vendor/lineage kernel/xiaomi/mocha"
+fail=0
+applied=0
+skipped=0
 
-# red + nocolor
-RED='\033[0;31m'
-NC='\033[0m'
-
-for dir in $dirs ; do
-	cd $rootdirectory
-	cd $dir
-    echo -e "\n${RED}Applying ${NC}$dir ${RED}patches...${NC}\n"
-	for p in $rootdirectory/device/xiaomi/mocha/patches/$dir/*.patch ; do
-		[ -e "$p" ] || continue
-		if git apply --check "$p" 2>/dev/null ; then
-			git apply -v "$p"
-		elif git apply --check -R "$p" 2>/dev/null ; then
-			echo "already applied: $(basename $p)"
-		else
-			echo -e "${RED}FAILED: ${NC}$p"
-		fi
-	done
+for dir in $(list_repos); do
+    if ! repo_exists "$dir"; then
+        echo "AVISO: el repo '$dir' no existe en el arbol; se omite"
+        continue
+    fi
+    echo
+    echo "== $dir =="
+    for p in $(patches_of "$dir"); do
+        state=$(patch_state "$dir" "$p")
+        case "$state" in
+            APPLIED)
+                echo "  ya aplicado   $(basename "$p")"
+                skipped=$((skipped+1))
+                ;;
+            PENDING)
+                if ( cd "$tree_root/$dir" && git apply "$p" ); then
+                    echo "  aplicado      $(basename "$p")"
+                    applied=$((applied+1))
+                else
+                    echo "  FALLO         $(basename "$p")"
+                    fail=$((fail+1))
+                fi
+                ;;
+            BROKEN)
+                echo "  BROKEN        $(basename "$p")  (ni directo ni inverso)"
+                fail=$((fail+1))
+                ;;
+        esac
+    done
 done
 
-# -----------------------------------
-echo -e "Done !\n"
-cd $rootdirectory
+echo
+echo "resumen: applied=$applied ya_aplicados=$skipped fallos=$fail"
+[ "$fail" -ne 0 ] && exit 1
+exit 0
