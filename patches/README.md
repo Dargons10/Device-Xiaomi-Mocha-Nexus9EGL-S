@@ -47,10 +47,14 @@ Broadcom). No borrar los comentarios: son el historial de por qué existe cada u
 | `system/libhidl` | **`0001-VINTF-race-log-spam`** | spam por la carrera de VINTF al arranque (manifest aún no publicado); solo ruido, pero inundaba logcat y ocultaba fallos reales. Registro del commit `5787785` |
 | `system/bt` | **`0002-bt-rt-scheduling-FATAL-to-WARNING`** | el kernel 3.10 no permite la planificación RT que Bluetooth expects: registraba FATAL y mataba la stack; se degrada a WARNING. Registro del commit `57ce4c963` (complementa a `0001-ldac-codec-unavailable-fix`) |
 
-> Nota de registro: `frameworks/av/0004-camera-and-media-changes` esta **obsoleto**: hoy falla
-> tanto hacia delante como hacia atras (`install.sh` lo marcaria FAILED) porque su contenido se
-> reparte entre `0005`/`0006` (que si estan en el tree) y hunks que ya no existen. Hay que
-> regenerarlo desde el estado real de `frameworks/av` antes de fiarse de el.
+> Nota de registro (actualizada 2026-10-29): `frameworks/av/0004-camera-and-media-changes`
+> estaba **obsoleto** (fallaba hacia delante y hacia atras) porque se **solapaba con `0005` en
+> `media/libstagefright/colorconversion/SoftwareRenderer.cpp`**. Se ha **regenerado** desde el
+> estado sucio real de `frameworks/av` el 2026-10-29, excluyendo ese fichero (que pertenece a
+> `0005`) y `camera/Android.bp` (que pertenece a `0006`). Resultado: 17 ficheros,
+> 368 inserciones / 100 borrados, y los tres parches quedan **disjuntos** (`uniq -d` vacio).
+> Los tres pasan `git apply -R --check` sobre el arbol sucio actual. Los 19 ficheros sucios de
+> `frameworks/av` quedan cubiertos entre `0004` + `0005` + `0006` (conjunto «sin cubrir» vacio).
 
 ## Referencia cruzada
 
