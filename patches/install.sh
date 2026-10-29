@@ -4,7 +4,7 @@ echo $1
 rootdirectory="$PWD"
 # ---------------------------------
 
-dirs="bionic/libm frameworks/native frameworks/av frameworks/base hardware/interfaces hardware/lineage/interfaces system/extras system/core packages/apps/Camera2 packages/apps/Gallery2  hardware/broadcom/wlan hardware/broadcom/fm hardware/broadcom/libbt system/memory/lmkd system/netd system/connectivity/wificond system/sepolicy system/bt vendor/lineage kernel/xiaomi/mocha"
+dirs="bionic/libm frameworks/native frameworks/av frameworks/base hardware/interfaces hardware/lineage/interfaces system/extras system/core system/libhidl packages/apps/Camera2 packages/apps/Gallery2 packages/apps/Settings packages/apps/Trebuchet external/dng_sdk lineage-sdk hardware/broadcom/wlan hardware/broadcom/fm hardware/broadcom/libbt system/memory/lmkd system/netd system/connectivity/wificond system/sepolicy system/bt vendor/lineage kernel/xiaomi/mocha"
 
 # red + nocolor
 RED='\033[0;31m'
