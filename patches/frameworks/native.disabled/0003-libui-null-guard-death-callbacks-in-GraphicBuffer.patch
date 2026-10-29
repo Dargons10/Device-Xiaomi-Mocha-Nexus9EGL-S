@@ -1,0 +1,32 @@
+From cb7929a9ed18f95083f2a29c692eeb32310c367f Mon Sep 17 00:00:00 2001
+From: Dargons10 <jdamr2p@gmail.com>
+Date: Thu, 17 Sep 2026 20:50:44 +0200
+Subject: [PATCH] libui: null-guard death callbacks in ~GraphicBuffer A client
+ can die mid-teardown leaving a null callback registered; calling it
+ unconditionally crashed the surface owner.
+
+Co-authored-by: Qwen3.8-27B-local
+Change-Id: I06c0ae5ed562e96cd5b2e99f22583fd00ff8c75d
+Signed-off-by: Opencode <opencode.ai>
+---
+ libs/ui/GraphicBuffer.cpp | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/libs/ui/GraphicBuffer.cpp b/libs/ui/GraphicBuffer.cpp
+index 3732fee7f..571439004 100644
+--- a/libs/ui/GraphicBuffer.cpp
++++ b/libs/ui/GraphicBuffer.cpp
+@@ -113,7 +113,9 @@ GraphicBuffer::~GraphicBuffer()
+         free_handle();
+     }
+     for (auto& [callback, context] : mDeathCallbacks) {
+-        callback(context, mId);
++        if (callback) {
++            callback(context, mId);
++        }
+     }
+ }
+ 
+-- 
+2.47.3
+
