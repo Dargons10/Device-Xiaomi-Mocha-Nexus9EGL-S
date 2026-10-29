@@ -38,6 +38,20 @@ Broadcom). No borrar los comentarios: son el historial de por qué existe cada u
 | `kernel/xiaomi/mocha` | **`0002-defconfig-disable-cgroup_debug-and-debug_vm`** | `CONFIG_CGROUP_DEBUG=y` y `CONFIG_DEBUG_VM=y` estaban activos en 2 GB de RAM (comprobaciones de VM y ficheros de depuración cgroup); Abobo7 17.1 los trae desactivados. `CONFIG_ANDROID_BINDER_IPC_32BIT` NO se toca: nuestro wire binder es de 64 bits y todo el HIDL/FD-passing funciona sobre él |
 | `kernel/xiaomi/mocha` | **`0003-dts-include-mocha-camera-mc-and-disable-legacy-sensors`** | `tegra124-mocha.dts` desactiva el `vi` del SoC «para evitar conflicto con nuestro mocha-vi», pero el nodo `nvidia,mocha-vi` vive en `tegra124-mocha-camera-mc.dtsi`, que **no estaba incluido** -> no hay platform device para `drivers/media/platform/tegra/v4l2/tegra_vi.c` -> no hay `/dev/video*` -> 0 cámaras. El parche incluye el dtsi, añade `clocks=<&tegra_car 20/21>` + `clock-names="mclk"` (ids del propio `tvc.dtsi`) a `imx179@10`/`ov5693@36` y desactiva en defconfig los claim legacy (`VIDEO_IMX179/OV5693/AD5823/CAMERA`) para que los clientes i2c nacidos del DT se los quede el subdev V4L2. Ver `plan_fixes_F9.md` |
 
+| `kernel/xiaomi/mocha` | **`0004-plan-A-stock-tvc-camera-host`** | Plan A (HAL stock NVIDIA): el kernel pasa al modelo TVC/pcl -> `tegra124-mocha.dts` incluye el dtsi de cámara, se elimina el dtsi `tvc` duplicado y el defconfig activa el host TVC. Registro del commit `4d03d64aa6d` del repo del kernel |
+| `kernel/xiaomi/mocha` | **`0005-dts-point-camera-include-at-an-existing-dtsi`** | el include del dtsi de cámara apuntaba a un fichero que no existe en el árbol; el include debe apuntar al dtsi real. Registro del commit `43cebb30695` |
+| `external/dng_sdk` | **`0001-remove-sdk_version-from-libdng_sdk`** | `sdk_version` en `libdng_sdk` obliga a una SDK de plataforma que no encaja con este tree; sin él la lib se construye con los headers del tree. Registro del commit `04a2068` |
+| `lineage-sdk` | **`0001-health-null-guard-when-HAL-absent`** | `isChargingModeSupported()` lanzaba NPE cuando el HAL de health no está (mocha no tiene HAL health propio). Registro del commit `b4f8a06d` |
+| `packages/apps/Settings` | **`0002-guard-null-Activity-in-SettingsPreferenceFragment`** | `hasNextButton()`/`getNextButton()` con Activity nula (prefs abiertos desde fuera del flujo de Setup) -> NPE. Registro del commit `ceaee0eefc` |
+| `packages/apps/Trebuchet` | **`0001-remove-setupImageDecoder-from-QuickstepProcessInitializer`** | el initializer llamaba a un decodificador de imágenes no disponible en la pila gráfica de T124. Registro del commit `2dd9154f56` |
+| `system/libhidl` | **`0001-VINTF-race-log-spam`** | spam por la carrera de VINTF al arranque (manifest aún no publicado); solo ruido, pero inundaba logcat y ocultaba fallos reales. Registro del commit `5787785` |
+| `system/bt` | **`0002-bt-rt-scheduling-FATAL-to-WARNING`** | el kernel 3.10 no permite la planificación RT que Bluetooth expects: registraba FATAL y mataba la stack; se degrada a WARNING. Registro del commit `57ce4c963` (complementa a `0001-ldac-codec-unavailable-fix`) |
+
+> Nota de registro: `frameworks/av/0004-camera-and-media-changes` esta **obsoleto**: hoy falla
+> tanto hacia delante como hacia atras (`install.sh` lo marcaria FAILED) porque su contenido se
+> reparte entre `0005`/`0006` (que si estan en el tree) y hunks que ya no existen. Hay que
+> regenerarlo desde el estado real de `frameworks/av` antes de fiarse de el.
+
 ## Referencia cruzada
 
 - `notes_abobo17_analysis.md` (raíz del árbol): lista completa de los parches del
