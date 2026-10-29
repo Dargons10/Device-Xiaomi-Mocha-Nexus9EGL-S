@@ -98,13 +98,23 @@ void libEvtUnloading(void) __attribute__((destructor));
  *           in a package name as a "string16" to the consrtuctor. Since this
  *           lib only services camera library, it is easy for us to just do that
  *           and this provide the constructor that the camera library wants.
- *           The package name we use if "camera.msm8960". Why not?
+ *           El original del árbol msm8916 usaba "camera.msm8960"/"camera.msm8916".
+ *
+ *           2026-10-28 (medido en 19.1/mocha): ese nombre NO existe como paquete, y en
+ *           Android 12 sensorservice lo usa para resolver el targetSdkVersion del llamante
+ *           -> lanza una RemoteException dentro del provider:
+ *             E/JavaBinder: *** Uncaught remote exception!
+ *             Caused by: android.os.RemoteException: Couldn't get targetSdkVersion for
+ *             package camera.msm8916
+ *           (coincide en el tiempo con el 'received signal 13' (SIGPIPE) con el que init
+ *           mato al provider). Se usa "android", que SI es un paquete instalado
+ *           (framework-res, application con hasCode=false) y por tanto resoluble.
  */
 void _ZN7android13SensorManagerC1Ev(void *sensorMgr)
 {
     void *string;
 
-    _ZN7android8String16C1EPKc(&string, "camera.msm8916");
+    _ZN7android8String16C1EPKc(&string, "android");
     _ZN7android13SensorManagerC1ERKNS_8String16E(sensorMgr, &string);
     _ZN7android8String16D1Ev(&string);
 }
@@ -124,7 +134,18 @@ void _ZN7android13SensorManager16createEventQueueEv(void **retVal, void *sensorM
 
     _ZN7android7String8C1EPKc(&string8, "nvcamera-legacy");
     _ZN7android8String16C1EPKc(&string16, "camera.tegra");
-    _ZN7android13SensorManager16createEventQueueENS_7String8EiNS_8String16E(retVal, sensorMgr, &string8, -1, &string16);
+    /* [mocha] modo NORMAL = 0, NO -1.
+     * frameworks/native/services/sensorservice/SensorService.cpp:1305 (lineage-19.1):
+     *   if (requestedMode != NORMAL && requestedMode != DATA_INJECTION) return nullptr;
+     * (NORMAL = 0, DATA_INJECTION = 1: SensorService.h:282/292)
+     * El shim original venia de CM/M con -1, que entonces se aceptaba. En Android 12 -1 hace
+     * que el SensorService devuelva nullptr -> libsensor loguea "createEventQueue: connection
+     * is NULL" -> NvDeviceOrientation::initialize falla -> NvCameraHal3Core "Sensor Listener
+     * Failed to Initialize" -> NvCameraHal3 "open: Camera Open Failed" -> el HAL destruye el
+     * dispositivo y ~NvDeviceOrientation::disable() llama a disableSensor() sobre la queue NULL
+     * (SIGSEGV, fault addr 0x10, r0=0), matando el provider en bucle. Medido 2026-10-28.
+     * El -1 de CM servia para "cualquier modo"; aqui hay que pedir el modo normal. */
+    _ZN7android13SensorManager16createEventQueueENS_7String8EiNS_8String16E(retVal, sensorMgr, &string8, 0 /*NORMAL*/, &string16);
     _ZN7android7String8D1Ev(&string8);
     _ZN7android8String16D1Ev(&string16);
 }
