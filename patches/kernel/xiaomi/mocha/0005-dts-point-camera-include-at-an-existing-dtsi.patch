@@ -1,0 +1,33 @@
+From 43cebb306950ddc7b51eac6fd8e4d31a0bc77d80 Mon Sep 17 00:00:00 2001
+From: Dargons10 <jdamr2p@gmail.com>
+Date: Wed, 28 Oct 2026 23:16:08 +0100
+Subject: [PATCH] ARM: tegra: mocha: point the camera include at an existing
+ dtsi
+
+The committed include referenced tegra124-mocha-camera-tvc.dtsi, which no
+longer exists in this tree (it was removed when the TVC camera model was
+switched), so building the DTB from a clean checkout fails on a missing
+include. Point the include at tegra124-mocha-camera.dtsi, which carries the
+NVIDIA pcl/TVC camera description the stock HAL expects: camera-pcl with
+pcl_IMX179 + pcl_AD5823 (rear) and pcl_OV5693 (front), including the
+detect/devid and poweron/poweroff sequences and the mocha GPIO/regulator sets.
+---
+ arch/arm/boot/dts/tegra124-mocha.dts | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm/boot/dts/tegra124-mocha.dts b/arch/arm/boot/dts/tegra124-mocha.dts
+index b1c529fd59a..a04f08c74ce 100644
+--- a/arch/arm/boot/dts/tegra124-mocha.dts
++++ b/arch/arm/boot/dts/tegra124-mocha.dts
+@@ -12,7 +12,7 @@
+ /* end of static dtsi files */
+ 
+ #include "tegra124-platforms/tegra124-mocha-sysedp.dtsi"
+-#include "tegra124-platforms/tegra124-mocha-camera-tvc.dtsi"
++#include "tegra124-platforms/tegra124-mocha-camera.dtsi"
+ #include "panel-s-wqxga-7-9-x6.dtsi"
+ 
+ / {
+-- 
+2.47.3
+
