@@ -191,3 +191,29 @@ nuestro árbol:
   `bounds.bottom - bounds.top <= 2*radius` ✓
 * opcional: llevar su test `drawLayers_r15ReusedOutputCpuReadback` a
   `frameworks/native/libs/renderengine/tests/RenderEngineTest.cpp` como cobertura ✓
+
+## PENDIENTE (medido 2026-10-28): etiquetas SELinux de los datos del HAL NVIDIA en /data
+
+Medido montando /data rw desde TWRP (tablet en health-charging):
+
+    /data/nvcam/                drwxrwxrwx root:root
+      factory_OTP_0.bin         -rw------- 1047:1005   u:object_r:system_data_root_file:s0
+      nvcam_cache_0.bin         -rw------- 1047:1005   u:object_r:system_data_root_file:s0
+      nvcam_cache_1.bin         -rw------- 1047:1005   u:object_r:system_data_root_file:s0
+
+- DAC ya es correcto: 1047=AID_CAMERASERVER, 1005=AID_AUDIO coinciden con
+  'user cameraserver' / 'group audio ...' del rc del provider -> no es un problema de permisos.
+- El problema es la etiqueta: heredan de /data ('system_data_root_file'), y un dominio vendor
+  (hal_camera_default) no puede leerlas. Hoy el device es permissive -> solo se registro
+  'avc: denied { read/open } ... /data/nvcam/nvcam_cache_0.bin' y el HAL pudo seguir
+  (de hecho escribio esos caches el 2026-10-27 23:53, o sea la capa NVMM camera funciona).
+- Al pasar a enforcing habra que:
+  1) anadir a sepolicy/mocha/file_contexts una entrada para estas rutas, p.ej.
+       /data/nvcam(/.*)?          u:object_r:vendor_data_file:s0   (o un tipo propio)
+       /data/calibration\.bin     u:object_r:vendor_data_file:s0
+  2) y en sepolicy/mocha/hal_camera_default.te los permisos correspondientes
+     (dir: search; file: {open read getattr}; create si el HAL reescribe los caches),
+     comprobando que no viola los neverallow de data_file_type (el build de sepolicy los aplica).
+  3) Verificar en vivo con: restorecon -Rv /data/nvcam && ls -Z /data/nvcam
+     y getenforce / avc: denied en logcat.
+- No se aplico hoy para no mezclar variables: primero hay que confirmar preview/frames.
