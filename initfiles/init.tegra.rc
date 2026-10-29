@@ -64,6 +64,14 @@ on post-fs-data
 
     mkdir /data/vendor/mediadrm 0770 mediadrm mediadrm
 
+    # /data/nvcam: el blob NVIDIA (libnvmm_camera_v3.so) tiene hard-codedas
+    # /data/nvcam/{factory_OTP,nvcam_cache,factory_EEPROM,factory_copy,CameraParameters.yml}
+    # y NO comprueba el resultado de NvOsFopen: si falta el directorio, fopen() devuelve
+    # NULL y NvCameraIspDumpFactoryToFile -> NvOsFwrite(NULL) peta el provider
+    # (SIGSEGV fault addr 0x0, bucle de reinicio). El HAL corre como user cameraserver,
+    # group camera -> 0700 cameraserver camera (identico a Abobo7 init.tegra.rc).
+    mkdir /data/nvcam 0700 cameraserver camera
+
     mkdir /data/vendor/nvcam 0700 media camera
 
     chown dhcp dhcp /data/vendor/dhcp
