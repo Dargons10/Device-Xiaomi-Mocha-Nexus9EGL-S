@@ -1,0 +1,45 @@
+From 9a23d277993df2e5e1bc1ee3782be851a734c4c3 Mon Sep 17 00:00:00 2001
+From: Dargons10 <jdamr2p@gmail.com>
+Date: Wed, 28 Oct 2026 08:05:39 +0100
+Subject: [PATCH] camera provider rc: preload the mocha ABI shims in this
+ service only
+
+Android 12 no longer consumes TARGET_LD_SHIM_LIBS, and RTLD_GLOBAL from
+camera.tegra.so was measured not to reach the symbols of blobs loaded through
+android_load_sphal_library(), so the shims are injected with a per-service
+LD_PRELOAD: libmocha_cpp_shim.so (legacy std::ios_base::Init names),
+libmocha_sensor_shim.so, libshim_atomic.so. Global LD_PRELOAD was measured to
+break APEX binaries, hence this scoped form. Remove the setenv line to revert.
+
+Change-Id: I67401ae208e0a905a9bea4fa7018d8cf570c775c
+---
+ ...droid.hardware.camera.provider@2.4-service.rc | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/camera/provider/2.4/default/android.hardware.camera.provider@2.4-service.rc b/camera/provider/2.4/default/android.hardware.camera.provider@2.4-service.rc
+index f7ac9f83e..b011c70c5 100644
+--- a/camera/provider/2.4/default/android.hardware.camera.provider@2.4-service.rc
++++ b/camera/provider/2.4/default/android.hardware.camera.provider@2.4-service.rc
+@@ -6,3 +6,19 @@ service vendor.camera-provider-2-4 /vendor/bin/hw/android.hardware.camera.provid
+     ioprio rt 4
+     capabilities SYS_NICE
+     task_profiles CameraServiceCapacity MaxPerformance
++    # [mocha] LD_PRELOAD de los shims ABI para el HAL stock NVIDIA (camera.vendor.tegra.so).
++    # El blob es de 2015 y referencia symbols que en Android 12 viven en librerias que el blob
++    # NO enlaza: Singleton<SensorManager>::sLock (libsensor) y std::ios_base::Init::~Init
++    # (libc++; libbeautify.so enlaza el libstdc++.so legacy que solo tiene stubs).
++    # Los LD_PRELOAD entran en el *shared group* del enlazador, que es lo unico que consulta
++    # el blob cargado por android_load_sphal_library: medido en vivo el 2026-10-27, un dlopen
++    # normal del shim (RTLD_GLOBAL desde device/xiaomi/mocha/camera/CameraWrapper.cpp) NO lo
++    # resuelve, mientras que con LD_PRELOAD el error del SensorManager desaparece y sube el
++    # siguiente simbolo. Ver device/xiaomi/mocha/patches/README.md (hardware_interfaces 0005).
++    # NUNCA `export LD_PRELOAD` global: los binarios de /apex corren en el namespace
++    # "(default)" y revientan al enlazar (ver device/xiaomi/mocha/initfiles/init.nvgpu_shims.rc).
++    # libmocha_cpp_shim.so enlaza libc++ a proposito para arrastrarla al shared group.
++    # libFaceProc.so NO se puede precargar: tiene DT_TEXTREL y el enlazador lo rechaza en la
++    # fase del ejecutable (medido 2026-10-28: 'CANNOT LINK EXECUTABLE ... has text
++    # relocations'), lo que dejo al provider sin arrancar. Ver CameraWrapper.cpp.
++    setenv LD_PRELOAD /vendor/lib/libmocha_cpp_shim.so:/vendor/lib/libmocha_sensor_shim.so:/vendor/lib/libshim_atomic.so
+-- 
+2.47.3
+
