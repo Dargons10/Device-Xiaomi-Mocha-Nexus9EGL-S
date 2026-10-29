@@ -1,0 +1,49 @@
+From ceaee0eefc283aa671580bbe5c50ee65d8b59c0a Mon Sep 17 00:00:00 2001
+From: Dargons10 <jdamr2p@gmail.com>
+Date: Fri, 2 Oct 2026 21:24:05 +0200
+Subject: [PATCH] Settings: guard hasNextButton/getNextButton against a null
+ Activity
+
+NetworkProviderSettings.changeNextButtonState() can fire from a WifiPickerTracker
+callback after the fragment has been detached, so getActivity() returns null and
+the (ButtonBarHandler) cast then .hasNextButton() call threw a NullPointerException
+that killed com.android.settings on Wi-Fi-only (no RIL) devices.
+
+Return false/null when the host activity is not a ButtonBarHandler.
+
+Co-authored-by: Qwen3.8-27B-local
+Change-Id: Ic7fbde42103bde53a6eb3970803f94dcb1656ee9
+Signed-off-by: Opencode <opencode@opencode.ai>
+---
+ .../android/settings/SettingsPreferenceFragment.java | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/src/com/android/settings/SettingsPreferenceFragment.java b/src/com/android/settings/SettingsPreferenceFragment.java
+index d3e1c49c06..5e8e871120 100644
+--- a/src/com/android/settings/SettingsPreferenceFragment.java
++++ b/src/com/android/settings/SettingsPreferenceFragment.java
+@@ -686,11 +686,19 @@ public abstract class SettingsPreferenceFragment extends InstrumentedPreferenceF
+     }
+ 
+     protected boolean hasNextButton() {
+-        return ((ButtonBarHandler) getActivity()).hasNextButton();
++        Activity activity = getActivity();
++        if (!(activity instanceof ButtonBarHandler)) {
++            return false;
++        }
++        return ((ButtonBarHandler) activity).hasNextButton();
+     }
+ 
+     protected Button getNextButton() {
+-        return ((ButtonBarHandler) getActivity()).getNextButton();
++        Activity activity = getActivity();
++        if (!(activity instanceof ButtonBarHandler)) {
++            return null;
++        }
++        return ((ButtonBarHandler) activity).getNextButton();
+     }
+ 
+     public void finish() {
+-- 
+2.47.3
+
