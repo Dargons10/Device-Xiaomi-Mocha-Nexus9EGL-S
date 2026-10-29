@@ -282,6 +282,25 @@ static int camera3_configure_streams(const camera3_device *device, camera3_strea
         }
     }
 
+    // Observabilidad del camino de captura. El retorno del vendor y los max_buffers
+    // que el HAL Tegra asigna a cada stream permiten distinguir
+    // 'configure_streams rechazo la configuracion' de 'configuro y no llegan frames',
+    // que es exactamente el segundo cuadro del 'Waiting on the syncpt semaphore'.
+    ALOGI("%s: camera %d vendor configure_streams retorno=%d num_streams=%zu",
+            __FUNCTION__, CAMERA_ID(device), ret,
+            stream_list ? stream_list->num_streams : (size_t)0);
+    if (stream_list != NULL && stream_list->streams != NULL) {
+        for (size_t i = 0; i < stream_list->num_streams; ++i) {
+            camera3_stream_t* stream = stream_list->streams[i];
+            if (stream == NULL) {
+                continue;
+            }
+            ALOGI("%s: camera %d stream[%zu] resultado max_buffers=%u format=0x%x %ux%u type=%d",
+                    __FUNCTION__, CAMERA_ID(device), i, stream->max_buffers,
+                    stream->format, stream->width, stream->height, stream->stream_type);
+        }
+    }
+
     return ret;
 }
 
