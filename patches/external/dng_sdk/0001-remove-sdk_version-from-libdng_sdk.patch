@@ -1,0 +1,31 @@
+From 04a2068b8f8a73b63b6403652548dcd68638d0ed Mon Sep 17 00:00:00 2001
+From: Dargons10 <jdamr2p@gmail.com>
+Date: Wed, 30 Sep 2026 22:17:39 +0200
+Subject: [PATCH] fix: remove sdk_version from libdng_sdk
+
+Remove sdk_version: "current" from libdng_sdk in Android.bp.
+The 19.1 tree does not have the required SDK version, causing
+a Soong build failure.
+
+Co-authored-by: Qwen3.8-27B-local
+Change-Id: I627ee81d0a09fa7780c1424d06f4fd9b4fc227ee
+Signed-off-by: Opencode <opencode@opencode.ai>
+---
+ Android.bp | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/Android.bp b/Android.bp
+index b74b91b..3e5fb33 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -166,7 +166,6 @@ cc_defaults {
+ cc_library{
+     name: "libdng_sdk",
+     host_supported: true,
+-    sdk_version: "current",
+     defaults: ["libdng_sdk-defaults"],
+     vendor_available: true,
+ 
+-- 
+2.47.3
+
