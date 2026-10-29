@@ -39,3 +39,27 @@ binder_call(hal_camera_default, surfaceflinger)
 # The blob reads /etc/nvcamera.conf and /etc/model_frontal.xml
 # (= /system/etc) at init.
 r_dir_file(hal_camera_default, system_file)
+
+#
+# /data/nvcam (ver sepolicy/mocha/file.te y sepolicy/mocha/init.te): el blob NVIDIA
+# escribe ahi con NvOsFwrite sin comprobar el NULL de su NvOsFopen -> si no puede
+# crear/escribir, SIGSEGV en bucle (factory_OTP_0.bin, nvcam_cache_0.bin,
+# nvcam_cache_1.bin, factory_copy_0.bin, CameraParameters.yml...).
+# Para RECORRER /data no hace falta ninguna regla: A12 ya se la da a todos los dominios
+#   public/domain.te:245-247
+#     allow domain system_data_root_file:dir { search getattr };
+#   (los neverallow de domain.te:871 y :883 excluyen expresamente system_data_root_file)
+#
+allow hal_camera_default nv_camera_data_file:dir  create_dir_perms;
+allow hal_camera_default nv_camera_data_file:file create_file_perms;
+
+#
+# Denegacion medida en permissive durante el arranque de la camara:
+#   hal_camera_default -> camera_config_prop:file { read open }
+# camera_config_prop se declara con system_vendor_config_prop() (public/property.te:126)
+# y en el A12 de este arbol NO tiene ninguna regla de dominio; el neverallow del macro
+# (te_macros:914-917) solo prohibe el 'set' fuera de init/vendor_init, la lectura es
+# libre. get_prop expande a { getattr open read map } (te_macros:338-340), que cubre
+# exactamente lo observado.
+#
+get_prop(hal_camera_default, camera_config_prop)

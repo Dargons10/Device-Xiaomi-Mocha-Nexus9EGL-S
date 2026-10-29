@@ -1,0 +1,26 @@
+# /data/nvcam lo crea init ('mkdir /data/nvcam 0700 cameraserver camera' en
+# initfiles/init.tegra.rc, on post-fs-data). make_dir_with_options()
+# (system/core/init/builtins.cpp:399-444) SOLO hace mkdir/lchown/fchmod/fscrypt:
+# NO pone ninguna etiqueta SELinux -> la etiqueta tiene que llegar por una de estas
+# dos vias, y van las dos porque en un device ya arranqueado el directorio existe
+# con la etiqueta heredada de /data (system_data_root_file) y una transicion solo
+# actua en la creacion.
+#
+# 1) type_transition: al crear init un dir cuyo padre es /data (private/file_contexts:511
+#    '/data u:object_r:system_data_root_file:s0'), el nuevo dir nace ya etiquetado.
+#    init esta declarado en public/init.te:2 ('type init, domain, mlstrustedsubject'),
+#    por eso puede haber reglas suyas en la mitad vendor de la politica.
+#    El chequeo de permisos se hace contra el tipo TRANSICIONADO (SELinux comprueba la
+#    etiqueta final del objeto), de ahi el create_dir_perms sobre nv_camera_data_file.
+#
+# 2) relabelto: initfiles/init.tegra.rc hace 'restorecon_recursive /data/nvcam'
+#    (builtin do_restorecon_recursive, builtins.cpp:1090 -> selinux_android_restorecon)
+#    para reetiquetar el directorio que ya existia mal etiquetado de los arranques
+#    anteriores, sin tocar el resto de /data y sin borrar la cache de calibracion que
+#    genera el propio blob (factory_OTP_0.bin, nvcam_cache_0.bin, nvcam_cache_1.bin).
+#    Nota: init NO tiene relabelto general para data_file_type en A12 (en
+#    private/init.te solo hay 'allow init vd_device:blk_file relabelto;' :81), por eso
+#    se pide explicitamente para nuestro tipo.
+allow init nv_camera_data_file:dir create_dir_perms;
+allow init nv_camera_data_file:dir relabelto;
+type_transition init system_data_root_file:dir nv_camera_data_file;

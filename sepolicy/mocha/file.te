@@ -1,0 +1,28 @@
+# Tipo para el directorio de trabajo del stack privativo NVIDIA.
+#
+# libnvmm_camera_v3.so tiene hard-codedas las rutas
+#   /data/nvcam/factory_OTP_<id>.bin
+#   /data/nvcam/nvcam_cache_<id>.bin
+#   /data/nvcam/factory_EEPROM_<id>.bin / factory_copy_<id>.bin / CameraParameters.yml
+# y su NvOsFileSystem NO comprueba el NULL que devuelve NvOsFopen: si el directorio
+# falta o no se puede escribir, NvCameraIspDumpFactoryToFile llama a NvOsFwrite(NULL)
+# y el proveedor de camara muere con SIGSEGV (SEGV_MAPERR, fault addr 0x0) en bucle.
+# Ver device/xiaomi/mocha/docs/analisis_s_log_vs_abobo_20261029.md (causa raiz 2).
+#
+# Patron tomado de nuestros propios ficheros Tegra (sepolicy/common/vendor/file.te:113
+# 'type nvpmodel_data, file_type, data_file_type;' y :116 'nvphsd_data'), NINGUNO de
+# los cuales usa core_data_file_type. En A12 'camera_data_file' (public/file.te:411)
+# lleva core_data_file_type, reservado a dominios de plataforma, y hal_camera_default
+# es dominio vendor -> no sirve aqui. El equivalente vendor en A12 es vendor_data_file
+# (public/file.te:294, 'file_type, data_file_type'), que es el modelo que seguimos.
+# Precedente de HAL vendor con tipo propio de datos en el mismo arbol:
+#   device/generic/goldfish/sepolicy/common/hal_drm_default.te:4
+#     allow hal_drm_default mediadrm_vendor_data_file:dir create_dir_perms;
+#
+# OJO: este fichero TIENE que estar en un directorio PLANO declarado en
+# BOARD_VENDOR_SEPOLICY_DIRS (sepolicy/mocha, BoardConfig.mk:259). sepolicy/common/vendor
+# NO se recorre (no es plano) y por eso sus tipos (nvpmodel_data, nvphsd_data, los
+# gpu_device/tsec_device privativos de Tegra) dan 'unknown type' si se usan desde
+# sepolicy/mocha -> ver el aviso de cabecera de sepolicy/mocha/file_contexts y
+# BoardConfig.mk:224-256.
+type nv_camera_data_file, file_type, data_file_type;

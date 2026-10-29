@@ -71,6 +71,14 @@ on post-fs-data
     # (SIGSEGV fault addr 0x0, bucle de reinicio). El HAL corre como user cameraserver,
     # group camera -> 0700 cameraserver camera (identico a Abobo7 init.tegra.rc).
     mkdir /data/nvcam 0700 cameraserver camera
+    # La etiqueta SELinux no la pone 'mkdir' (make_dir_with_options, builtins.cpp:399-444,
+    # solo hace mkdir/lchown/fchmod/fscrypt). Arranques nuevos: type_transition en
+    # sepolicy/mocha/init.te. En un /data ya existente el directorio HEREDA la etiqueta
+    # de /data (system_data_root_file) y ahi hace falta reetiquetar: restorecon_recursive
+    # (do_restorecon_recursive -> selinux_android_restorecon, builtins.cpp:1090) usando la
+    # entrada /data/nvcam(/.*)? de sepolicy/mocha/file_contexts. Solo toca /data/nvcam,
+    # no el resto de /data, y preserva la cache de calibracion ya generada.
+    restorecon_recursive /data/nvcam
 
     mkdir /data/vendor/nvcam 0700 media camera
 

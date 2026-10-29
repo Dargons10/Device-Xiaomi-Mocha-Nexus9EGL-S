@@ -64,6 +64,20 @@
 /dev/nvhost-nvenc([0-9])?          u:object_r:video_device:s0
 /dev/nvhost-nvjpg                  u:object_r:gpu_device:s0
 
+#
+# /data/nvcam: directorio de trabajo del stack privativo NVIDIA (OTP + cache de
+# calibracion de los sensores). Lo crea init en 'on post-fs-data'
+# (initfiles/init.tegra.rc:73) y lo usa hal_camera_default con rutas hard-codedas.
+# La etiqueta llega por dos vias (ver sepolicy/mocha/init.te): type_transition en la
+# creacion y restorecon_recursive para el directorio que ya existe mal etiquetado de
+# arranques anteriores (heredaba system_data_root_file de /data).
+# El tipo se declara aqui al lado, en file.te, porque este si es un directorio plano
+# consumido por el merge; los tipos de sepolicy/common/vendor NO son visibles (ver
+# aviso de arriba). No se usa camera_data_file: en A12 lleva core_data_file_type
+# (public/file.te:411), reservado a dominios de plataforma, y hal_camera_default es vendor.
+#
+/data/nvcam(/.*)?                 u:object_r:nv_camera_data_file:s0
+
 # OJO: NO se etiquetan aquí /dev/nvmap, /dev/nvhost-*gpu, /dev/tegra_dc_*,
 # /dev/nvhost-tsec, /dev/tegra_cec, /dev/tegra_cpc, /dev/ozwpan, /dev/quadd*
 # ni /dev/socket/{nvphsd,charon*} aunque estén en common/vendor/file_contexts:

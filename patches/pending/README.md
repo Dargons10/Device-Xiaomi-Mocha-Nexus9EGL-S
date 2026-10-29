@@ -242,17 +242,73 @@ Validado en vivo (mkdir manual + reboot): `Dump factory file into /data/nvcam/fa
 completed`, aparecen `nvcam_cache_0.bin` y `nvcam_cache_1.bin`, `dumpsys media.camera` reporta
 `Number of camera devices: 2` y `com.android.camera2` abre la camara 0.
 
-Lo que QUEDA para enforcing sigue siendo la etiqueta (recipe de Abobo7):
+## APLICADO 2026-10-29: etiqueta + permisos de /data/nvcam (compilado y verificado en outputs)
 
-    sepolicy: type nv_camera_data_file, file_type, data_file_type, core_data_file_type;
-    file_contexts: /data/nvcam(/.*)?  u:object_r:nv_camera_data_file:s0
-    cameraserver.te / hal_camera_default.te:
-        allow X nv_camera_data_file:dir  create_dir_perms;
-        allow X nv_camera_data_file:file create_file_perms;
-    (abobo7_device/sepolicy/file.te:81, file_contexts:208, cameraserver.te:20-21)
+Implementado en el arbol (build `b20261029-121301`, zip anclado
+`~/mocha-zips/ANCLA-lineage-19.1-20261029-1216-con-sepolicy-horneada.zip`, md5
+`183691cd916970aa1310f81cdc4425ee`):
 
-Anadir tambien las denegaciones medidas hoy (permissive=1):
+* `sepolicy/mocha/file.te` (nuevo): `type nv_camera_data_file, file_type, data_file_type;`
+* `sepolicy/mocha/file_contexts`: `/data/nvcam(/.*)?  u:object_r:nv_camera_data_file:s0`
+* `sepolicy/mocha/hal_camera_default.te`: `create_dir_perms` + `create_file_perms` sobre el
+  tipo + `get_prop(hal_camera_default, camera_config_prop)`
+* `sepolicy/mocha/init.te` (nuevo): `allow init nv_camera_data_file:dir create_dir_perms;`,
+  `allow init nv_camera_data_file:dir relabelto;`,
+  `type_transition init system_data_root_file:dir nv_camera_data_file;`
+* `initfiles/init.tegra.rc`: anadido `restorecon_recursive /data/nvcam` junto al `mkdir`
+* `BoardConfig.mk`: comentario (re-parseo de kati para que el `$(wildcard)` vea los ficheros
+  nuevos; trampa documentada en ese propio fichero)
+
+Tres desviaciones del recipe de Abobo7, todas justificadas con medidas en este arbol:
+
+1. **NO** se usa `core_data_file_type`. El nuestro es `file.te:81` de Abobo con ese atributo;
+   en A12 ese atributo esta reservado a dominios de plataforma y `hal_camera_default` es vendor.
+   El patron de nuestros otros devices Tegra de este mismo arbol
+   (`sepolicy/common/vendor/file.te:113,116`: `nvpmodel_data`, `nvphsd_data`) es
+   `file_type, data_file_type`, y `vendor_data_file` (`public/file.te:294`) confirma el modelo.
+   Medido en `out/.../obj/FAKE/sepolicy_neverallows_intermediates/policy.conf:70099`: compila,
+   y el atributo `core_data_file_type` NO incluye nuestro tipo (0 coincidencias). Los 09
+   `allow` salen en `policy.conf:70195,70196` y `:70236-70238`.
+2. **NO** se reutiliza `camera_data_file` (`public/file.te:411`): ademas de llevar
+   `core_data_file_type`, en A12 **no tiene ninguna regla de dominio** (solo declaracion y la
+   etiqueta de `/data/misc/camera` en `private/file_contexts:589`), o sea no aportaba nada.
+3. La etiqueta no la pone `mkdir`: `make_dir_with_options()` (`system/core/init/builtins.cpp:
+   399-444`) solo hace mkdir/lchown/fchmod/fscrypt. Por eso van las dos vias: la
+   `type_transition` (para la creacion) y `restorecon_recursive` (para el directorio que ya
+   existe de los arranques anteriores, etiquetado `system_data_root_file` heredado de `/data`
+   -- ver la medicion de arriba con TWRP). `init` NO tiene `relabelto` general para
+   `data_file_type` en A12, de ahi la regla explicita.
+
+Para RECORRER `/data` no hace falta ninguna regla: A12 ya la da a todos los dominios, es la
+unica excepcion documentada en `public/domain.te:245-247`
+(`allow domain system_data_root_file:dir { search getattr };`) y los neverallows de
+`domain.te:871,883` excluyen expresamente `system_data_root_file`.
+
+Verificado en los artefactos del build (no hace falta device para esto):
+* `out/.../system/vendor/etc/selinux/vendor_file_contexts:106` -> la etiqueta de `/data/nvcam`
+* `out/.../obj/ETC/vendor_sepolicy.cil: (type nv_camera_data_file)`, `(roletype object_r ...)`,
+  `allow hal_camera_default nv_camera_data_file:dir/:file` con los permisos completos
+* `out/.../obj/ETC/vendor_sepolicy.cil_intermediates/vendor_policy_raw.cil` -> las reglas de
+  `init` (create_dir_perms y relabelto) y la `type_transition` (355 transiciones en la politica
+  fusionada: es el mecanismo estandar, no un apaño)
+* `precompiled_sepolicy` (591136 B, el que carga init por la via rapida) contiene el tipo
+* `out/.../system/vendor/etc/init/hw/init.tegra.rc:73,81` -> mkdir + restorecon_recursive
+* `file_contexts.bin` contiene el tipo (1 coincidencia)
+
+Nota: las reglas de `init` y la `type_transition` salen del `vendor_sepolicy.cil` empaquetado
+(分层 vendor/plat) pero SI estan en la politica fusionada que compila `secilc`; la comprobacion
+definitiva es en runtime: `ls -Zd /data/nvcam` y `ls -Z /data/nvcam/*.bin` (deben dar
+`nv_camera_data_file`, no `system_data_root_file`) + `getenforce` + `avc: denied` en logcat.
+
+QUEDA pendiente para enforcing (medido hoy, permissive=1) - NO tocado a proposito:
 
     hal_camera_default -> /dev/nvmap            chr_file read/write/open   (hoy etiqueta 'device')
     hal_camera_default -> /dev/nvhost-ctrl      chr_file ioctl 0x4807
-    hal_camera_default -> camera_config_prop    file read/open
+
+Esos dos nodos siguen etiquetados como `device` generico: los tipos `gpu_device`/privativos de
+Tegra viven en `sepolicy/common/vendor/file.te`, que no es un directorio leaf consumido por el
+merge (BoardConfig.mk:224-256), y cambiar la etiqueta sin tener a la vez los `allow` de
+hal_camera/surfaceflinger/zygote/app/mediacodec regresaria los graficos. Va en la ronda
+dedicada de graphics sepolicy + F10.
+
+(`camera_config_prop`, la tercera denegacion medida, SI esta cubierta ya con `get_prop`.)

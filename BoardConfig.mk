@@ -256,6 +256,17 @@ SELINUX_IGNORE_NEVERALLOWS := true
 # que las rutas del device aparecen en la etiqueta de las particiones.
 # Se usan rutas literales (no $(LOCAL_PATH)) por coherencia con Lineage/Abobo7: en el
 # parseo Make del BoardConfig LOCAL_PATH no está garantizado.
+# 2026-10-29: se anaden sepolicy/mocha/file.te y sepolicy/mocha/init.te (nuevos ficheros
+# en un directorio ya declarado). Se toca este BoardConfig a proposito, solo con este
+# comentario, para que kati re-parsee y el $(wildcard) de los directorios de sepolicy
+# vuelva a listarlos (trampa documentada unas lineas arriba: kati no se re-ejecuta si
+# ningun Android.mk/BoardConfig.mk cambia). Verificado en los outputs del build anterior:
+# las etiquetas de sepolicy/mocha/file_contexts SI aparecen en el vendor_file_contexts
+# staged (124 lineas: /dev/imx179, /dev/ov5693, /dev/focuser vienen solo de aqui) y
+# tambien en obj/ETC/file_contexts.bin_intermediates/file_contexts.bin (ov5693 sale 2
+# veces = variante plana + '\..*', igual que en nuestro fichero); '/gl' sale en el .bin
+# gracias al canal LOCAL_FILE_CONTEXTS. La etiqueta de /data NO depende del .bin (que es
+# lo que usa e2fsdroid al empaquetar): la aplica init en runtime.
 BOARD_VENDOR_SEPOLICY_DIRS += \
     device/xiaomi/mocha/sepolicy/mocha \
     device/xiaomi/mocha/sepolicy/lineage-common \
