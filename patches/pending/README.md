@@ -217,3 +217,42 @@ Medido montando /data rw desde TWRP (tablet en health-charging):
   3) Verificar en vivo con: restorecon -Rv /data/nvcam && ls -Z /data/nvcam
      y getenforce / avc: denied en logcat.
 - No se aplico hoy para no mezclar variables: primero hay que confirmar preview/frames.
+
+## CORREGIDO 2026-10-29: /data/nvcam NO existia (causa real del SIGSEGV del provider)
+
+Medido en el device tras el arranque del 2026-10-29:
+
+    ls: /data/nvcam: No such file or directory
+
+y el blob tiene las rutas hard-codedas (strings drivers de libnvmm_camera_v3.so):
+
+    /data/nvcam/factory_OTP   /data/nvcam/nvcam_cache   /data/nvcam/factory_EEPROM
+    /data/nvcam/factory_copy  /data/nvcam/factory_device /data/nvcam/CameraParameters.yml
+
+El blob **no comprueba el NULL que devuelve NvOsFopen**, asi que la falta del directorio se
+convierte en `NvCameraIspDumpFactoryToFile -> NvOsFwrite(NULL)` -> SIGSEGV fault addr 0x0 y el
+provider entra en bucle de reinicio (`LegacyCameraProviderImpl_2_4::initialize`).
+
+Fix aplicado (identico a `abobo7_device/rootdir/etc/init.tegra.rc:57`), en
+`initfiles/init.tegra.rc` dentro de `on post-fs-data`:
+
+    mkdir /data/nvcam 0700 cameraserver camera
+
+Validado en vivo (mkdir manual + reboot): `Dump factory file into /data/nvcam/factory_OTP_0.bin
+completed`, aparecen `nvcam_cache_0.bin` y `nvcam_cache_1.bin`, `dumpsys media.camera` reporta
+`Number of camera devices: 2` y `com.android.camera2` abre la camara 0.
+
+Lo que QUEDA para enforcing sigue siendo la etiqueta (recipe de Abobo7):
+
+    sepolicy: type nv_camera_data_file, file_type, data_file_type, core_data_file_type;
+    file_contexts: /data/nvcam(/.*)?  u:object_r:nv_camera_data_file:s0
+    cameraserver.te / hal_camera_default.te:
+        allow X nv_camera_data_file:dir  create_dir_perms;
+        allow X nv_camera_data_file:file create_file_perms;
+    (abobo7_device/sepolicy/file.te:81, file_contexts:208, cameraserver.te:20-21)
+
+Anadir tambien las denegaciones medidas hoy (permissive=1):
+
+    hal_camera_default -> /dev/nvmap            chr_file read/write/open   (hoy etiqueta 'device')
+    hal_camera_default -> /dev/nvhost-ctrl      chr_file ioctl 0x4807
+    hal_camera_default -> camera_config_prop    file read/open
