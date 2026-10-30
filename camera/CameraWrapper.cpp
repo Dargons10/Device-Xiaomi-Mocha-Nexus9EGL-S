@@ -29,6 +29,8 @@
 
 #include "CameraWrapper.h"
 #include "Camera3Wrapper.h"
+#include "CameraModuleApi.h"
+#include "LegacyMetadata.h"
 
 
 //------------DEBUG-----------------
@@ -1043,9 +1045,25 @@ static int check_vendor_module()
     prepareImagerDevices();
 
     rv = hw_get_module_by_class("camera", "vendor", (const hw_module_t **)&gVendorModule);
-    if (rv)
+    if (rv) {
         ALOGE("failed to open vendor camera module");
+        gVendorModule = nullptr;
+        return rv;
+    }
+    ALOGI("vendor camera module: module_api 0x%x hal_api 0x%x",
+          gVendorModule->common.module_api_version, gVendorModule->common.hal_api_version);
+    if (!gVendorModule->get_number_of_cameras || !gVendorModule->get_camera_info ||
+            !gVendorModule->common.methods || !gVendorModule->common.methods->open) {
+        ALOGE("vendor camera module is incomplete");
+        gVendorModule = nullptr;
+        return -ENODEV;
+    }
     return rv;
+}
+
+camera_module_t *get_stock_camera_module(void)
+{
+    return check_vendor_module() ? nullptr : gVendorModule;
 }
 
 static struct hw_module_methods_t camera_module_methods = {
@@ -1065,7 +1083,7 @@ camera_module_t HAL_MODULE_INFO_SYM = {
          .reserved = {0},
     },
     .get_number_of_cameras = camera_get_number_of_cameras,
-    .get_camera_info = camera_get_camera_info,
+    .get_camera_info = get_mocha_camera_info,
     .set_callbacks = camera_set_callbacks,
     .get_vendor_tag_ops = camera_get_vendor_tag_ops,
     .open_legacy = NULL,
@@ -1642,9 +1660,16 @@ static int camera_set_callbacks(const camera_module_callbacks_t *callbacks)
 static void camera_get_vendor_tag_ops(vendor_tag_ops_t* ops)
 {
     ALOGV("%s", __FUNCTION__);
+    if (!ops) return;
+    memset(ops, 0, sizeof(*ops));
     if (check_vendor_module())
         return;
-    return gVendorModule->get_vendor_tag_ops(ops);
+    /* get_vendor_tag_ops only exists from CAMERA_MODULE_API_VERSION_2_2 on.  Reading
+     * it on the 2015 module would hand the provider an uninitialised ops table
+     * (measured: 'setUpVendorTags: Vendor tag operations not fully defined'). */
+    if (gVendorModule->common.module_api_version >= CAMERA_MODULE_API_VERSION_2_2 &&
+            gVendorModule->get_vendor_tag_ops)
+        gVendorModule->get_vendor_tag_ops(ops);
 }
 
 static int camera_open_legacy(const struct hw_module_t* module, const char* id, uint32_t halVersion, struct hw_device_t** device)
@@ -1652,6 +1677,62 @@ static int camera_open_legacy(const struct hw_module_t* module, const char* id, 
     ALOGV("%s", __FUNCTION__);
     if (check_vendor_module())
         return 0;
+    if (!gVendorModule->open_legacy)
+        return -ENOSYS;
 
     return gVendorModule->open_legacy(module, id, halVersion, device);
+}
+
+/*
+ * Characteristics shared by the provider (camera_get_camera_info) and by the HAL3.0
+ * adapter (normalizeRequest needs them for every capture request).  The blob is
+ * cloned once and kept for the process lifetime: camera_metadata_update() may
+ * reallocate vendorInfo[] in place, and the adapter holds a raw pointer.
+ *
+ * mocha::buildCharacteristics() converts a stock 2015 blob (SCALER_AVAILABLE_FORMATS
+ * / PROCESSED_SIZES / JPEG_SIZES tables) into the HAL3.2 view, advertises video
+ * stabilization OFF only (the stock NvIMUBasedVStab node needs sensor timestamps this
+ * ROM cannot provide and it stalls the VI/ISP pipeline) and claims partial results.
+ * The 2015 module returns no static metadata at all and our seed describes the
+ * catalog in HAL3.2 form already, so for mocha the conversion is expected to fail and
+ * the seeded blob is published unchanged.
+ */
+int get_mocha_camera_info(int id, camera_info* info)
+{
+    static camera_metadata_t *characteristics[2] = { nullptr, nullptr };
+
+    if (!info || id < 0 || id >= 2)
+        return -EINVAL;
+
+    camera_info raw = {};
+    int ret = camera_get_camera_info(id, &raw);
+    if (ret)
+        return ret;
+    if (!raw.static_camera_characteristics) {
+        ALOGE("%s: camera %d has no characteristics blob", __FUNCTION__, id);
+        return -EINVAL;
+    }
+
+    if (characteristics[id] == nullptr) {
+        android::Mutex::Autolock lock(gCameraWrapperLock);
+        if (characteristics[id] == nullptr) {
+            android::CameraMetadata built;
+            if (mocha::buildCharacteristics(raw.static_camera_characteristics, &built) &&
+                    (characteristics[id] = built.release()) != nullptr) {
+                ALOGI("%s: camera %d characteristics converted from a stock HAL3.0 blob", __FUNCTION__, id);
+            } else if ((characteristics[id] = clone_camera_metadata(raw.static_camera_characteristics)) != nullptr) {
+                ALOGI("%s: camera %d characteristics taken from the wrapper catalog (%zu entries)",
+                      __FUNCTION__, id, get_camera_metadata_entry_count(characteristics[id]));
+            } else {
+                return -ENOMEM;
+            }
+        }
+    }
+
+    memset(info, 0, sizeof(*info));
+    info->facing = raw.facing;
+    info->orientation = raw.orientation;
+    info->device_version = CAMERA_DEVICE_API_VERSION_3_2;
+    info->static_camera_characteristics = characteristics[id];
+    return 0;
 }

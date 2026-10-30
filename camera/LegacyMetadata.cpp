@@ -197,10 +197,21 @@ bool normalizeRequest(CameraMetadata* request, const camera_metadata_t* characte
 
 bool mergeMetadata(CameraMetadata* destination, const camera_metadata_t* source) {
     if (!source) return true;
+    // Tags whose A12 definition has another type, or no longer exists: the 2015
+    // blob puts them in every partial and final packet and camera_metadata_update()
+    // rejects them, which would fail the whole result packet.
+    static const uint32_t kLegacyTags[] = {
+        1048578, 589834, 589835, 1638400, 1638401, 1638402,
+        1703936, 1769472, 1769473, 1835013,
+    };
     for (size_t i = 0; i < get_camera_metadata_entry_count(source); ++i) {
         camera_metadata_ro_entry_t entry;
         if (get_camera_metadata_ro_entry(source, i, &entry)) return false;
-        if (entry.tag != ANDROID_QUIRKS_PARTIAL_RESULT && destination->update(entry)) return false;
+        if (entry.tag == ANDROID_QUIRKS_PARTIAL_RESULT) continue;
+        bool legacy = false;
+        for (uint32_t tag : kLegacyTags) if (tag == entry.tag) { legacy = true; break; }
+        if (legacy) continue;
+        if (destination->update(entry)) return false;
     }
     return true;
 }
