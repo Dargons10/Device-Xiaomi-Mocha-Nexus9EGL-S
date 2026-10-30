@@ -111,10 +111,19 @@ static bool traceEnabled() {
 
 static void trace(const char* fmt, ...) {
     if (!traceEnabled()) return;
-    if (traceFd < 0) traceFd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+    if (traceFd < 0) {
+        /* The camera provider is not root, so it normally cannot write /dev/kmsg.
+         * Fall back to a pre-created world writable file (created by adb root). */
+        traceFd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+        if (traceFd < 0)
+            traceFd = open("/data/local/tmp/mocha-hal30.log",
+                           O_WRONLY | O_APPEND | O_CLOEXEC);
+    }
     if (traceFd < 0) return;
     char line[400];
-    int length = snprintf(line, sizeof(line) - 2, "mocha-hal30 ");
+    auto now = std::chrono::steady_clock::now().time_since_epoch();
+    long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+    int length = snprintf(line, sizeof(line) - 2, "mocha-hal30 %8lld.%03lld ", ms / 1000, ms % 1000);
     if (length < 0) return;
     va_list args;
     va_start(args, fmt);
@@ -438,6 +447,27 @@ public:
             Stream& stream = *requestedStreams[i];
             frame->vendorBuffers[i].stream = &stream.legacy;
             frame->vendorBuffers[i].buffer = &stream.buffers.at(*request->output_buffers[i].buffer)->handle;
+            /* The HIDL device@3.2 implementation fills the fence members of the
+             * camera3_stream_buffer_t it hands us.  The 2015 NVIDIA HAL builds an
+             * android::Fence from acquire_fence and its destructor closes that fd,
+             * so a leftover 0 closes stdin and aborts the provider (fdsan), and a
+             * wait on it always consumes the full timeout.  Never let a stdio fd
+             * reach the legacy device. */
+            camera3_stream_buffer_t& vendor = frame->vendorBuffers[i];
+            int acquire = vendor.acquire_fence;
+            if (acquire >= 0 && acquire <= STDERR_FILENO) {
+                trace("buffer %u: acquire_fence %d is a stdio fd, dropping it", i, acquire);
+                vendor.acquire_fence = -1;
+            } else if (acquire >= 0) {
+                int copy = fcntl(acquire, F_DUPFD_CLOEXEC, 3);
+                trace("buffer %u: acquire_fence %d duplicated as %d", i, acquire, copy);
+                if (copy >= 0) vendor.acquire_fence = copy;
+                else vendor.acquire_fence = -1;
+            }
+            vendor.release_fence = -1;
+            trace("buffer %u: stream=%p acquire=%d release=%d status=%d",
+                  i, (void*)vendor.stream, vendor.acquire_fence, vendor.release_fence,
+                  vendor.status);
         }
         camera3_capture_request_t legacyRequest = *request;
         legacyRequest.output_buffers = frame->vendorBuffers.data();
@@ -447,9 +477,12 @@ public:
             std::lock_guard<std::mutex> stateLock(stateMutex);
             frames.emplace(request->frame_number, frame);
         }
+        auto t0 = std::chrono::steady_clock::now();
         int result = vendor->ops->process_capture_request(vendor, &legacyRequest);
+        long long spent = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0).count();
         if (legacyRequest.settings) frame->settings.unlock(legacyRequest.settings);
-        if (result) trace("process_capture_request %u -> %d", request->frame_number, result);
+        trace("process_capture_request %u -> %d in %lld ms", request->frame_number, result, spent);
         if (result) {
             std::lock_guard<std::mutex> stateLock(stateMutex);
             frames.erase(request->frame_number);
@@ -588,8 +621,12 @@ private:
             auto found = frames.find(stock->frame);
             if (found == frames.end()) {
                 ALOGE("Unexpected stock result frame %u", stock->frame);
-                for (unsigned i = 0; i < stock->count; ++i)
-                    if (stock->buffers[i].release_fence >= 0) ::close(stock->buffers[i].release_fence);
+                /* The legacy device fills camera3_stream_buffer_t entries of the
+                 * HAL3.0 shape, which has no fence members.  Reading them yields
+                 * whatever follows the struct, and closing such a value destroys an
+                 * unrelated descriptor (fdsan aborts the provider on fd 0). */
+                trace("unexpected stock result %u: %zu buffers dropped, no descriptors closed",
+                      stock->frame, stock->count);
                 return;
             }
             Frame& frame = *found->second;
@@ -618,7 +655,8 @@ private:
                 }
                 if (n == frame.vendorBuffers.size()) {
                     ALOGE("Unexpected stock buffer for frame %u", stock->frame);
-                    if (returned.release_fence >= 0) ::close(returned.release_fence);
+                /* Never close a descriptor the legacy device claims to own: it does
+                 * not own one, the field is not part of its struct. */
                     fatal = true;
                     drained.notify_all();
                     continue;
@@ -626,7 +664,9 @@ private:
                 auto converted = frame.clientBuffers[n];
                 converted.status = returned.status;
                 converted.acquire_fence = -1;
-                converted.release_fence = returned.release_fence;
+                /* The legacy device writes no release fence; hand the buffer back
+                 * without one instead of forwarding the value read past its struct. */
+                converted.release_fence = -1;
                 output.push_back(converted);
                 frame.returned[n] = true;
                 --frame.remaining;

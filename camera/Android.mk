@@ -91,8 +91,8 @@ include $(CLEAR_VARS)
 # precargado (setenv LD_PRELOAD en el .rc del provider) entra en el *shared group* del
 # enlazador, unico lugar que camera.vendor.tegra.so si consulta (medido: resolvio
 # Singleton<SensorManager>::sLock y avanzo el error de libbeautify.so).
-LOCAL_SRC_FILES := mocha_cpp_shim.cpp
-LOCAL_SHARED_LIBRARIES := libc++
+LOCAL_SRC_FILES := mocha_cpp_shim.cpp nvhost_submit_shim.cpp
+LOCAL_SHARED_LIBRARIES := libc++ liblog
 LOCAL_LDFLAGS := -Wl,--no-as-needed
 LOCAL_32_BIT_ONLY := true
 LOCAL_PROPRIETARY_MODULE := true
