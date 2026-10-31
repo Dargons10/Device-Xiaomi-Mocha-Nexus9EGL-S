@@ -17,6 +17,7 @@
 #define _GNU_SOURCE
 
 #include <dlfcn.h>
+#include <stdio.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -147,6 +148,11 @@ static_assert(kCurrentRequest == 0xc080481au,
 
 typedef int (*IoctlFn)(int, unsigned long, ...);
 
+struct SyncptIncr {   /* struct nvhost_syncpt_incr in the kernel */
+    uint32_t syncpt_id;
+    uint32_t incrs;
+};
+
 IoctlFn gRealIoctl = nullptr;
 unsigned gTranslations = 0;
 int gFirstFence = -1;
@@ -199,13 +205,32 @@ extern "C" int ioctl(int fd, unsigned request, ...) {
          * at the very same offset in both layouts, but copy it explicitly. */
         legacy->fence = translated.fence;
 
-        if (gTranslations < 3u) {
+        if (gTranslations < 12u) {
+            const SyncptIncr* incrs =
+                    (const SyncptIncr*)(uintptr_t)legacy->syncpt_incrs;
+            char sp[128];
+            unsigned n = legacy->num_syncpt_incrs;
+            unsigned i;
+            int len = 0;
+
+            sp[0] = '\0';
+            if (incrs != nullptr && n <= 8u) {
+                for (i = 0; i < n; i++)
+                    len += snprintf(sp + len, sizeof(sp) - (size_t)len,
+                            " %u:+%u", incrs[i].syncpt_id, incrs[i].incrs);
+            } else {
+                snprintf(sp, sizeof(sp), " ?");
+            }
+
             __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
-                    "nvhost submit ABI translated: 0x%x -> 0x%x flags 0x%x -> %s "
-                    "(fence %d, %u syncpt incrs, %u cmdbufs)",
-                    kLegacyRequest, kCurrentRequest, legacy->flags,
-                    ret == 0 ? "ok" : "failed", (int)translated.fence,
-                    legacy->num_syncpt_incrs, legacy->num_cmdbufs);
+                    "submit#%u ver=%u cmdbufs=%u syncpts=[%s] relocs=%u "
+                    "waitchks=%u waitbases?=%s timeout=%u flags=0x%x -> %s "
+                    "fence=%d (0x%x->0x%x)",
+                    gTranslations, legacy->submit_version, legacy->num_cmdbufs,
+                    sp, legacy->num_relocs, legacy->num_waitchks,
+                    legacy->class_ids ? "yes" : "no", legacy->timeout,
+                    legacy->flags, ret == 0 ? "ok" : "FAILED",
+                    (int)translated.fence, kLegacyRequest, kCurrentRequest);
         }
         gTranslations++;
         gFirstFence = (int)translated.fence;

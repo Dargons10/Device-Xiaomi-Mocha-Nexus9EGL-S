@@ -505,6 +505,18 @@ public:
             std::lock_guard<std::mutex> stateLock(stateMutex);
             closing = true;
         }
+        /* mocha: antes de cerrar el dispositivo stock hay que dejar que termine
+         * lo que tenga en vuelo.  Al cambiar de camara (frontal/trasera) o de
+         * modo, CameraService cierra esta dispositivo y el close() stock se
+         * ejecutaba con peticiones sin completar: el HAL de 2015 seguia
+         * escribiendo en buffers ya liberados y el provider petaba.
+         * drain() espera hasta 3 s (los requests del HAL stock tardan ~2 s). */
+        int drained = drain();
+        {
+            std::lock_guard<std::mutex> stateLock(stateMutex);
+            trace("adapter: drain previa al cierre de camera %s -> %d (inflight=%zu)",
+                  deviceName.c_str(), drained, frames.size());
+        }
         int result = vendor ? vendor->common.close(&vendor->common) : 0;
         trace("adapter for camera %s closed (%d)", deviceName.c_str(), result);
         vendor = nullptr;
@@ -554,6 +566,11 @@ private:
         camera_module_t* stock = get_stock_camera_module();
         if (!stock || !stock->common.methods || !stock->common.methods->open) return -ENODEV;
         if (vendor) {
+            // Igual que en close(): no cerrar el dispositivo stock con requests
+            // en vuelo, o el HAL escribe en buffers que ya no nos pertenecen.
+            int drained = drain();
+            trace("reopenVendor: drain previa al cierre de %s -> %d", deviceName.c_str(),
+                  drained);
             vendor->common.close(&vendor->common);
             vendor = nullptr;
         }
