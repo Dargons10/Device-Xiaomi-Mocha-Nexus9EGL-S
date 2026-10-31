@@ -27,11 +27,69 @@
 
 #define LOG_TAG "MochaCameraShim"
 
+#include <android/log.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
 #include <errno.h>
 #include <poll.h>
 #include <unistd.h>
 
 #include <camera/CameraMetadata.h>
+
+/*
+ * fdIsSyncFence - ¿es un fence de verdad?
+ *
+ * Medido 2026-10-31 23:12 (probe_nvhost.sh, sesion limpia de 15 s con la camara trasera):
+ *   el provider tiene 170-186 fds abiertos, de ellos 126-138 anon_inode:dmabuf,
+ *   6 canales VI (/dev/nvhost-ctrl-vi, /dev/nvhost-vi), 2 ISP, 2 nodos de sensor
+ *   (/dev/imx179, /dev/focuser) ... y CERO fds de tipo sync_file.
+ * Es decir: el blob de 2015 construye android::Fence(fd) con un fd que NO es un
+ * fence del kernel, y luego espera 2000 ms.  poll() sobre un dmabuf (o un ashmem, o
+ * un fd anonimo sin poll) no devuelve nunca POLLIN y tampoco devuelve error: se
+ * agota el timeout entero.  Eso es exactamente lo que se ve en logcat:
+ *   E/NvCameraHal3: processCaptureRequest: Request 0: Buffer 0: Fence timed out after 2000 ms
+ *   E/NvCameraHal3: processCaptureRequest: Request 1: Buffer 0: Fence timed out after 2000 ms
+ * y el consiguiente 'process_capture_request ... in 2002 ms'.
+ *
+ * En este kernel (3.10 con drivers/staging/android/sync.c) un fence si que es un
+ * anon_inode: los nombres posibles son sync_file (kernels nuevos) o
+ * stagingandroid / nvhost_sync (3.10).  Cualquier otra cosa no es un fence: se trata
+ * como 'ya senalizado' y no se espera nada.
+ */
+static int fdIsSyncFence(int fd, char *name, size_t nameSize) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+    ssize_t n = ::readlink(path, name, nameSize - 1);
+    if (n <= 0) {
+        if (nameSize > 0) name[0] = '\0';
+        return -1; /* no se puede saber: no bloquear */
+    }
+    name[n] = '\0';
+    if (strstr(name, "sync_file") || strstr(name, "stagingandroid") ||
+        strstr(name, "nvhost_sync"))
+        return 1;
+    return 0;
+}
+
+/* Traza limitada: el HAL abre muchos fences por segundo. */
+static void fenceTrace(const char *fmt, ...) {
+    static unsigned budget = 40;
+    static unsigned dropped = 0;
+    if (budget == 0) {
+        dropped++;
+        if ((dropped % 500u) == 0u)
+            __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
+                                "traza de fences: %u lineas mas omitidas", dropped);
+        return;
+    }
+    budget--;
+    va_list ap;
+    va_start(ap, fmt);
+    __android_log_vprint(ANDROID_LOG_INFO, LOG_TAG, fmt, ap);
+    va_end(ap);
+}
 
 /*
  * android::Fence::wait(unsigned int timeOutMs)
@@ -48,6 +106,21 @@ extern "C" int _ZN7android5Fence4waitEj(int *self, unsigned int timeOutMs) {
     if (fd < 0)
         return 0; /* invalid fence: treat as already signaled */
 
+    /* Diagnostic 2026-10-31: NO cambiamos el comportamiento.  Solo miramos que tipo de
+     * fd es, para saber si el blob de 2015 esta esperando un fence real del kernel o
+     * otra cosa (un dmabuf, un pipe, un fd ya cerrado).  Medido con probe_nvhost.sh:
+     * el provider de camara tiene 170-186 fds abiertos durante una sesion (126-138
+     * anon_inode:dmabuf, 5-6 canales VI, 2 ISP, 2 nodos de sensor) y CERO fds de tipo
+     * sync_file, mientras logcat dice 'Request 0: Buffer 0: Fence timed out after
+     * 2000 ms'.  Si aqui sale 'NO es un fence', el wait de 2 s del HAL no pasa por
+     * esta funcion y hay que buscarlo en el fence interno de NVIDIA (TVMR). */
+    char name[128];
+    int isFence = fdIsSyncFence(fd, name, sizeof(name));
+    if (isFence != 1) {
+        fenceTrace("Fence::wait(%u ms): fd %d NO es un fence del kernel (%s); se espera de todos modos",
+                   timeOutMs, fd, isFence == 0 ? name : "readlink fallo");
+    }
+
     struct pollfd pfd;
     pfd.fd = fd;
     pfd.events = POLLIN;
@@ -59,10 +132,17 @@ extern "C" int _ZN7android5Fence4waitEj(int *self, unsigned int timeOutMs) {
         ret = ::poll(&pfd, 1, timeout);
     } while (ret < 0 && errno == EINTR);
 
-    if (ret == 0)
+    if (ret == 0) {
+        fenceTrace("Fence::wait(%u ms): fd %d (%s) NO senalizado -> -ETIMEDOUT",
+                   timeOutMs, fd, name[0] ? name : "?");
         return -ETIMEDOUT;
-    if (ret < 0)
+    }
+    if (ret < 0) {
+        fenceTrace("Fence::wait(%u ms): fd %d (%s) poll fallo %s -> -%d",
+                   timeOutMs, fd, name[0] ? name : "?", strerror(errno), errno);
         return -errno;
+    }
+    fenceTrace("Fence::wait(%u ms): fd %d (%s) senalizado", timeOutMs, fd, name);
     return 0;
 }
 

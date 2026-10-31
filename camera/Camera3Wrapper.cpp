@@ -18,6 +18,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <poll.h>
 #include <set>
 #include <stdarg.h>
 #include <stdio.h>
@@ -73,6 +74,101 @@ struct Callbacks {
     camera3_callback_ops_t ops;
     Camera* owner;
 };
+
+/*
+ * Medido 2026-10-31 22:28 (logcat /tmp/desp_222844.log; provider pid 2008, arranque
+ * limpio, pantalla desbloqueada, camara trasera):
+ *   E/NvCameraHal3: processCaptureRequest: Request 0: Buffer 0: Fence timed out after 2000 ms
+ *   E/NvCameraHal3: processCaptureRequest: Request 1: Buffer 0: Fence timed out after 2000 ms
+ *   134521 lineas de 'Waiting on the syncpt semaphore failed 0x2' en 10 s (pid 2008)
+ *   0 submits legacy traducidos por nvhost_submit_shim durante ese intervalo
+ * camera.vendor.tegra.so construye un android::Fence con el acquire_fence del buffer y
+ * llama a su wait(2000): el _ZN7android5Fence4waitEj de la ABI antigua resuelve a
+ * nuestro shim (poll(POLLIN) sobre el fd).  El fence que entrega el framework NUNCA se
+ * senala por este camino, asi que cada peticion se traga los 2000 ms completos - es el
+ * 'process_capture_request 0 -> 0 in 2002 ms' que ya se habia medido - y el HAL nunca
+ * llega a submitar nada a nvhost, mientras su monitor de syncpoints se pasa ~10 s
+ * esperando cuadros que no llegan (esa es la inundacion).
+ *
+ * persist.mocha.camera.acq:
+ *   1 (por defecto) - esperamos el fence nosotros, con un techo corto, y entregamos -1
+ *                     al HAL de 2015: su wait sale inmediato (fd invalido).
+ *   0               - comportamiento anterior: duplicar el fd y dejar que espere el HAL.
+ */
+static const int kAcqWaitMs = 250;
+
+static int acqPolicy() {
+    static int cached = -1;
+    if (cached < 0) {
+        char prop[92] = {0};
+        property_get("persist.mocha.camera.acq", prop, "1");
+        cached = atoi(prop);
+    }
+    return cached;
+}
+
+/* Un sync_file senala POLLIN; un fd que no se puede esperar (EINVAL/EBADF - el gralloc
+ * legacy de mocha no produce sync_file) se trata como "ya senalado": no tiene sentido
+ * bloquear 2 s sobre algo que no va a cambiar nunca. */
+static bool waitFenceShort(int fd, int ms) {
+    struct pollfd pfd;
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    for (;;) {
+        int r = ::poll(&pfd, 1, ms);
+        if (r > 0) return (pfd.revents & (POLLIN | POLLERR | POLLHUP)) != 0;
+        if (r == 0) return false;
+        if (errno == EINTR) continue;
+        return true;
+    }
+}
+
+/* Describe el native_handle_t que recibe el HAL stock de 2015: sus fds (con el tipo
+ * real, mirando /proc/self/fd) y sus enteros.
+ *
+ * Medido 2026-10-31 23:50 (traza_adquirir.sh): el blob llama a
+ *   android::Fence::wait(2000 ms)
+ * sobre el **fd 1**, que en el provider es un pipe de log ('pipe:[27741]'), y el shim
+ * lo confirma:
+ *   I/MochaCameraShim: Fence::wait(2000 ms): fd 1 NO es un fence del kernel (pipe:[27741])
+ *   I/MochaCameraShim: Fence::wait(2000 ms): fd 1 (pipe:[27741]) NO senalizado -> -ETIMEDOUT
+ *   E/NvCameraHal3: processCaptureRequest: Request 0: Buffer 0: Fence timed out after 2000 ms
+ * El adapter pasa acquire_fence = -1 (y el shim de Fence devuelve 0 inmediato para fd
+ * negativo), asi que ese 1 no sale del acquire_fence: sale de otra parte del buffer -
+ * muy probablemente un entero del handle legacy que el blob interpreta como fd de
+ * fence.  Esta funcion sirve para verlo. */
+static void describeHandle(const native_handle_t* h, char* out, size_t outSize) {
+    if (!h) {
+        snprintf(out, outSize, "handle=NULL");
+        return;
+    }
+    int n = snprintf(out, outSize, "numFds=%d numInts=%d fds=[", h->numFds, h->numInts);
+    if (n < 0) { out[0] = '\0'; return; }
+    size_t used = (size_t)n;
+    for (int i = 0; i < h->numFds && used + 1 < outSize; ++i) {
+        int fd = h->data[i];
+        char target[96];
+        target[0] = '\0';
+        if (fd >= 0) {
+            char path[64];
+            snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+            ssize_t r = ::readlink(path, target, sizeof(target) - 1);
+            if (r > 0) target[r] = '\0';
+        }
+        n = snprintf(out + used, outSize - used, "%s%d(%s)", i ? "," : "", fd,
+                     target[0] ? target : "?");
+        if (n < 0) break;
+        used += (size_t)n;
+    }
+    if (used + 1 < outSize) used += (size_t)snprintf(out + used, outSize - used, "] ints=[");
+    for (int i = 0; i < h->numInts && used + 1 < outSize; ++i) {
+        n = snprintf(out + used, outSize - used, "%s%d", i ? "," : "", h->data[h->numFds + i]);
+        if (n < 0) break;
+        used += (size_t)n;
+    }
+    if (used + 1 < outSize) snprintf(out + used, outSize - used, "]");
+}
 
 /*
  * HAL3.0 requires the buffers of a stream to be registered before they may be
@@ -455,16 +551,47 @@ public:
              * reach the legacy device. */
             camera3_stream_buffer_t& vendor = frame->vendorBuffers[i];
             int acquire = vendor.acquire_fence;
+            static unsigned long long acqTotal = 0, acqUnsignaled = 0, acqBogus = 0;
+            bool verbose = request->frame_number < 8u;
             if (acquire >= 0 && acquire <= STDERR_FILENO) {
-                trace("buffer %u: acquire_fence %d is a stdio fd, dropping it", i, acquire);
+                acqTotal++;
+                acqBogus++;
+                if (verbose)
+                    ALOGI("buffer %u: acquire_fence %d es un fd de stdio, se descarta "
+                          "(acumulado total=%llu bogus=%llu)", i, acquire, acqTotal,
+                          acqBogus);
                 vendor.acquire_fence = -1;
             } else if (acquire >= 0) {
-                int copy = fcntl(acquire, F_DUPFD_CLOEXEC, 3);
-                trace("buffer %u: acquire_fence %d duplicated as %d", i, acquire, copy);
-                if (copy >= 0) vendor.acquire_fence = copy;
-                else vendor.acquire_fence = -1;
+                acqTotal++;
+                bool signaled = waitFenceShort(acquire, kAcqWaitMs);
+                if (!signaled) acqUnsignaled++;
+                if (verbose)
+                    ALOGI("buffer %u: acquire_fence=%d signaled=%d policy=%d "
+                          "(acumulado total=%llu sin_senalar=%llu bogus=%llu)",
+                          i, acquire, signaled ? 1 : 0, acqPolicy(), acqTotal,
+                          acqUnsignaled, acqBogus);
+                /* El framework nos cede la propiedad del fd: hay que cerrarlo, si no
+                 * se filtra uno por buffer y por peticion. */
+                int copy = acqPolicy() == 0 ? fcntl(acquire, F_DUPFD_CLOEXEC, 3) : -1;
+                /* ::close: dentro de Camera hay un metodo close(), hay que pedir el de libc */
+                ::close(acquire);
+                vendor.acquire_fence = copy;
             }
             vendor.release_fence = -1;
+            /* Que ve exactamente el blob de 2015 por cada buffer de la peticion. */
+            if (verbose) {
+                char desc[384];
+                /* HAL3.0: el blob hace *(*pBuffer->buffer) para quedarse con el handle.
+                 * En HAL3.2+ (lo que nos da el framework) ese mismo campo apunta a un
+                 * indice de buffer, no a un handle: por eso nosotros ponemos &ref.handle. */
+                const buffer_handle_t paraElBlob = vendor.buffer ? *vendor.buffer : nullptr;
+                describeHandle(paraElBlob, desc, sizeof(desc));
+                ALOGI("buffer %u: acquire=%d release=%d status=%d indice_cliente=%d handle {%s}",
+                      i, vendor.acquire_fence, vendor.release_fence, vendor.status,
+                      request->output_buffers[i].buffer
+                          ? (int)*request->output_buffers[i].buffer : -1,
+                      desc);
+            }
             trace("buffer %u: stream=%p acquire=%d release=%d status=%d",
                   i, (void*)vendor.stream, vendor.acquire_fence, vendor.release_fence,
                   vendor.status);
