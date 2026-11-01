@@ -17,12 +17,14 @@
 #define _GNU_SOURCE
 
 #include <dlfcn.h>
+#include <stdlib.h>
 #include <sys/types.h>
 
 /* readlink sin arrastrar <unistd.h>: unistd.h activa las dos declaraciones
  * __overloadable de ioctl() de bionic (unsigned / unsigned long), que chocan
  * con nuestra definicion de ioctl. */
 extern "C" ssize_t readlink(const char* __path, char* __buf, size_t __bufsize);
+extern "C" int close(int __fd);
 #include <stdio.h>
 #include <errno.h>
 #include <stdarg.h>
@@ -137,6 +139,10 @@ constexpr unsigned kIocDirShift = 30;
 constexpr unsigned kIocSizeShift = 16;
 constexpr unsigned kIocTypeShift = 8;
 
+/* include/linux/nvhost_ioctl.h: '#define NVHOST_SUBMIT_FLAG_SYNC_FENCE_FD 0',
+ * y bus_client.c hace 'if (args->flags & BIT(NVHOST_SUBMIT_FLAG_SYNC_FENCE_FD))'. */
+constexpr unsigned kFlagSyncFenceFd = 0;
+
 constexpr unsigned legacyRequest(unsigned size) {
     return (kIocDirRW << kIocDirShift) | (size << kIocSizeShift) |
            (kNvhostMagic << kIocTypeShift) | kSubmitCmd;
@@ -162,6 +168,41 @@ struct SyncptIncr {   /* struct nvhost_syncpt_incr in the kernel */
 IoctlFn gRealIoctl = nullptr;
 unsigned gTranslations = 0;
 int gFirstFence = -1;
+
+/*
+ * El blob llama SIEMPRE con flags=0x0 medido (1163 submits de una sesion, todos
+ * flags=0x0): su ABI de 2015 no tiene forma de pedir un fence, y en el kernel de
+ * 2015 el ioctl lo creaba de fabrica.  Nuestro kernel (3.10.108 reconstruido) hace
+ *
+ *   if (flags & BIT(NVHOST_SUBMIT_FLAG_SYNC_FENCE_FD))  -> fence = fd de sync real
+ *   else if (num_syncpt_incrs == 1)                     -> fence = Umbral del syncpoint
+ *   else                                                -> fence = 0
+ *
+ * y el blob mete ese entero en android::Fence como si fuera un fd.  Eso explica
+ * todo lo medido: Fence(fd 1002), Fence(fd 0), el poll sobre un pipe (fd 1) que
+ * tragaba 2000 ms por peticion, el 'fdsan: attempted to close file descriptor 0'
+ * y las 25127 lineas de NvOsDebugPrintf 'Waiting on the syncpt semaphore failed
+ * 0x2' (ENOENT: ese "fence" no es un objeto de sync) en 10 s.
+ *
+ * Por eso el shim ENCIENDE el flag.  Se puede apagar con MOCHA_CAMERA_SYNCFD=0 en
+ * el entorno del provider para comparar.
+ */
+unsigned gExtraFlags = 0xffffffffu;
+int gCloseFences = -1;          /* -1 sin decidir, 1 cerrar, 0 conservar */
+unsigned gFencesClosed = 0;
+unsigned gFencesKept = 0;
+
+static unsigned extraFlags() {
+    if (gExtraFlags == 0xffffffffu) {
+        const char* mode = getenv("MOCHA_CAMERA_SYNCFD");
+        gCloseFences = (mode != nullptr && mode[0] == 'k') ? 0 : 1;   /* 'keep' = conservar */
+        gExtraFlags = (mode != nullptr && mode[0] == '0') ? 0u : (1u << kFlagSyncFenceFd);
+        __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                "submit: flags=0x%x anadido a los submits del blob; modo=%s",
+                gExtraFlags, gCloseFences ? "cerrar el fence despues del submit" : "keep");
+    }
+    return gExtraFlags;
+}
 
 /*
  * Traza de TODOS los ioctl sobre nodos nvhost, medida 2026-11-01 10:52: el shim
@@ -232,7 +273,7 @@ extern "C" int ioctl(int fd, unsigned request, ...) {
         translated.timeout = legacy->timeout;
         /* The whole point of this shim: the 32 bit fallback struct cannot
          * carry these flags and the kernel then drops the sync fence fd. */
-        translated.flags = legacy->flags;
+        translated.flags = legacy->flags | extraFlags();
         translated.syncpt_incrs = legacy->syncpt_incrs;
         translated.cmdbuf_exts = legacy->cmdbuf_exts;
         translated.cmdbufs = legacy->cmdbufs;
@@ -244,6 +285,24 @@ extern "C" int ioctl(int fd, unsigned request, ...) {
         translated.fences = legacy->fences;
 
         int ret = gRealIoctl(fd, kCurrentRequest, &translated);
+
+        /* El kernel nos devolvio un fd de sync fence.  El blob de 2015 trata ese
+         * campo como un entero: lo mete en estructuras internas y NUNCA lo cierra
+         * (medido: 1589 submits en 10 s terminaron con 1816 descriptores abiertos
+         * en el provider, 1 por submit).  Tampoco lo usa para esperar: los unicos
+         * Fence::wait que vemos son sobre fd 0 y fd -1.  Asi que lo cerramos aqui
+         * y devolvemos 0 (= /dev/null, siempre senalado), que es lo que el blob ya
+         * tolera sin bloquearse. */
+        if (ret == 0 && gCloseFences && translated.fence > 2u) {
+            close((int)translated.fence);
+            translated.fence = 0;
+            gFencesClosed++;
+            if (gFencesClosed == 1u || (gFencesClosed % 500u) == 0u)
+                __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                        "submit: %u fences del kernel cerrados tras el submit", gFencesClosed);
+        } else if (translated.fence > 2u) {
+            gFencesKept++;
+        }
 
         /* The kernel wrote the fence into our struct; the caller expects it
          * at the very same offset in both layouts, but copy it explicitly. */

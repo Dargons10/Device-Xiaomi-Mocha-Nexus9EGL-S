@@ -29,6 +29,7 @@
 #include <utility>
 #include <vector>
 #include <cutils/properties.h>
+#include <sys/mman.h>
 #include <hardware/camera3.h>
 #include <hardware/gralloc.h>
 #include <log/log.h>
@@ -138,6 +139,102 @@ static bool waitFenceShort(int fd, int ms) {
  * negativo), asi que ese 1 no sale del acquire_fence: sale de otra parte del buffer -
  * muy probablemente un entero del handle legacy que el blob interpreta como fd de
  * fence.  Esta funcion sirve para verlo. */
+/*
+ * Inspeccion del contenido del buffer que devuelve el blob (2026-11-01 11:19).
+ * Con los fences ya reales el adapter entrega ~90 peticiones en 10 s, cada una con
+ * su buffer, pero la captura de pantalla sigue sin mostrar una imagen reconocible.
+ * Para separar "aqui no llegan fotogramas" de "el preview esta apuntando a una
+ * habitacion oscura", mapeamos el dmabuf del buffer devuelto y sacamos estadisticas
+ * de contenido.  Un encuadre fijo deberia dar muestras casi constantes entre frames
+ * consecutivos; un buffer que nadie rellena se ve siempre igual (blanco, negro o
+ * basura), y un buffer reutilizado con datos reales cambia de firma frame a frame.
+ */
+static bool traceEnabled();
+static void trace(const char* fmt, ...);
+
+unsigned gPeeks = 0;
+unsigned char gLastSig[16];
+
+static void peekBuffer(const native_handle_t* h, uint32_t frame) {
+    if (h == nullptr || h->numFds <= 0) {
+        trace("peek %u: handle sin fds", frame);
+        return;
+    }
+    int fd = h->data[0];
+    for (int i = 0; i < h->numFds; ++i) {
+        char path[64], target[96];
+        snprintf(path, sizeof(path), "/proc/self/fd/%d", h->data[i]);
+        ssize_t r = ::readlink(path, target, sizeof(target) - 1);
+        if (r > 0) {
+            target[r] = '\0';
+            if (strstr(target, "dmabuf")) {
+                fd = h->data[i];
+                break;
+            }
+        }
+    }
+    size_t size = 0;
+    for (int i = 0; i < h->numInts; ++i) {
+        int v = h->data[h->numFds + i];
+        if (v >= 0x10000 && v <= 0x8000000 && (v & 0xFFF) == 0) {
+            size = (size_t)v;
+            break;
+        }
+    }
+    if (size == 0)
+        size = 2u * 1024u * 1024u;
+    void* map = mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
+    if (map == MAP_FAILED) {
+        trace("peek %u: fd=%d tam=%zu mmap FALLO (%s)", frame, fd, size, strerror(errno));
+        return;
+    }
+    const unsigned char* base = (const unsigned char*)map;
+    unsigned char sig[16];
+    unsigned lo = 255, hi = 0, cambios = 0, muestras = 0;
+    unsigned long suma = 0;
+    unsigned prev = base[0];
+    for (size_t i = 0; i < size; i += 4096) {
+        unsigned v = base[i];
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+        suma += v;
+        muestras++;
+        if (v != prev) {
+            cambios++;
+            prev = v;
+        }
+    }
+    for (int k = 0; k < 16; k++)
+        sig[k] = base[(size_t)k * (size / 16u) + 16u];
+    bool igual = gPeeks > 0 && memcmp(sig, gLastSig, sizeof(sig)) == 0;
+    memcpy(gLastSig, sig, sizeof(sig));
+    gPeeks++;
+    trace("peek %u: fd=%d tam=%zu min=%u max=%u media=%.1f cambios=%u/%u firma=%02x%02x%02x%02x %s",
+          frame, fd, size, lo, hi, muestras ? (double)suma / muestras : 0.0,
+          cambios, muestras, sig[0], sig[1], sig[2], sig[3],
+          igual ? "IGUAL que el anterior" : "distinto al anterior");
+    /* Volcar el frame entero para poder mirarlo fuera: /data/local/tmp/mocha-frame[N].bin
+     * debe existir y ser escribible (lo crea medir7.sh con adb root). */
+    if (gPeeks <= 2u) {
+        char ruta[64];
+        snprintf(ruta, sizeof(ruta), "/data/local/tmp/mocha-frame%u.bin", gPeeks);
+        int out = open(ruta, O_WRONLY | O_TRUNC);
+        if (out >= 0) {
+            ssize_t w = 0;
+            while ((size_t)w < size) {
+                ssize_t n = write(out, base + w, size - (size_t)w);
+                if (n <= 0) break;
+                w += n;
+            }
+            close(out);
+            trace("peek %u: volcado %zd bytes en %s", frame, w, ruta);
+        } else {
+            trace("peek %u: no se pudo abrir %s (%s)", frame, ruta, strerror(errno));
+        }
+    }
+    munmap(map, size);
+}
+
 static void describeHandle(const native_handle_t* h, char* out, size_t outSize) {
     if (!h) {
         snprintf(out, outSize, "handle=NULL");
@@ -811,6 +908,8 @@ private:
                 /* The legacy device writes no release fence; hand the buffer back
                  * without one instead of forwarding the value read past its struct. */
                 converted.release_fence = -1;
+                if (traceEnabled() && (gPeeks < 4u || (gPeeks % 25u) == 0u))
+                    peekBuffer(returned.buffer ? *returned.buffer : nullptr, stock->frame);
                 output.push_back(converted);
                 frame.returned[n] = true;
                 --frame.remaining;
