@@ -193,7 +193,13 @@ int gFirstFence = -1;
  * Politicas posibles para el fd de sync fence que devuelve el kernel, seleccionables
  * sin recompilar (el provider lee el entorno y, si no esta, /data/local/tmp/mocha-syncfd-mode):
  *
- *   close (defecto)  cerrar el fd justo despues del submit y entregar 0 al blob.
+ *   handoff (defecto)  entregar al blob el fd real que da el kernel, y cerrarlo nosotros
+ *                     solo cuando el kernel ya lo senaliz6 (hilo recolector, max 200 ms).
+ *                     Es lo que espera el pipeline de 2015: el kernel senaliza ese fence en
+ *                     0..205 ms (sondeo del 2026-11-01 22:09) y ademas no se fuga el fd.
+ *   close            cerrar el fd justo despues del submit y entregar 0 al blob.  Se
+ *                     conserva como control: con fd 0 tambien salen frames, pero el blob
+ *                     no recibe la senal y inunda el log de esperas fallidas.
  *   keep              entregar el fd real y no cerrarlo (fuga de fds: solo para medir).
  *   reap              entregar el fd real y cerrarlo cuando el kernel lo senala, desde un
  *                     hilo propio con poll().  Es la politica que queremos si el pipeline de
@@ -208,8 +214,12 @@ int gFirstFence = -1;
  * fence del submit para senalar sus semaforos, entregarle 0 (un fd invalido para registrar)
  * explicaria que nunca reciba la senal y inunde el log.  'reap' mantiene el fd valido sin fugarse.
  */
-constexpr int kMaxOpenFences = 64;
-constexpr int kFenceMaxAgeMs = 1500;
+constexpr int kMaxOpenFences = 200;
+/* 2026-11-01 22:09, medido con el sondeo pasivo: el kernel senaliza el fence del submit
+ * de camara a los 0..205 ms (media 77 ms).  Con 200 ms el fd del blob sigue siendo valido
+ * mientras el blob lo necesita y encima lo entregamos ya senalizado.  El valor anterior
+ * (1500 ms) hacia aun peor el 'reap': llegabamos tarde a cerrar. */
+constexpr int kFenceMaxAgeMs = 200;
 
 /* struct pollfd y poll() declarados a mano: <poll.h> no esta incluido a proposito (ver el
  * comentario del readlink).  El layout es el del kernel/bionic. */
@@ -279,7 +289,10 @@ static void* fenceReaperThread(void*)
                 continue;
             }
             pf[n].fd = gOpenFences[i].fd;
-            pf[n].events = 0;
+            /* BUG ENCONTRADO 2026-11-01 21:43: con events = 0 no se pide NINGUN evento, o sea
+             * que poll() nunca devuelve revents y el recolector jamas veia un fence senalizado
+             * ('reap: 0 fences senalados').  Hay que pedir POLLIN (0x0001). */
+            pf[n].events = 0x0001;      /* POLLIN */
             pf[n].revents = 0;
             idx[n] = i;
             n++;
@@ -357,15 +370,166 @@ static const char* fenceModeName()
             }
         }
         if (mode == nullptr || mode[0] == '\0')
-            mode = "close";
+            mode = "handoff";   /* antes 'close': el sondeo mostro que el blob si necesita el fd */
     }
     return mode;
+}
+
+/* ============================================================================
+ * SONDEO PASIVO DE LOS FENCES DEL SUBMIT (es medida, no politica)
+ *
+ * Medido 2026-11-01 22:09 con este propio sondeo, y es el numero que resuelve la duda:
+ *
+ *     sondeo: 2400/1612 fences senalizados (media 77 ms, max 205 ms, 6 nunca senalizados)
+ *
+ * El kernel SI senaliza el sync fence del submit de camara, y tarda entre 0 y 205 ms
+ * (media ~77 ms con ~200 submits/s de preview a 1920x1080).  O sea que el flood
+ * 'Waiting on the syncpt semaphore failed' (101.561 esperas en los mismos 18 s) NO es
+ * un syncpt que nunca llega: es que el blob no ve esa senal.  En modo 'close' le damos
+ * fd 0, y en 'reap' el recolector puede cerrarlo antes de que venza su espera; en los
+ * dos casos el blob espera una senal que no va a llegar y reintenta en bucle.
+ *
+ * Dum duplicamos el fd que devuelve el kernel y lo observamos desde un hilo propio
+ * con poll(POLLIN).  Usamos un dup y no el fd del blob por dos motivos: no interferimos
+ * con nada que haga el blob con ese descriptor, y el dup mantiene viva la estructura
+ * interna del sync_file mientras nosotros la medimos.
+ * Cada fence sondeado acaba clasificado como:
+ *      senalizado en X ms   o   nunca senalizado dentro de kProbeMaxAgeMs
+ * ============================================================================ */
+extern "C" int dup(int __fd);
+
+constexpr int kProbeSlots = 24;
+constexpr int kProbeMaxAgeMs = 300;
+
+struct ProbeSlot {
+    int dupfd;
+    unsigned long long born_ms;
+    unsigned long long signed_ms;   /* 0 = todavia no se senalizo */
+};
+
+ProbeSlot gProbe[kProbeSlots];
+int gProbeCount = 0;
+bool gProbeStarted = false;
+pthread_mutex_t gProbeLock = PTHREAD_MUTEX_INITIALIZER;
+unsigned gProbeSeen = 0, gProbeSigned = 0, gProbeLost = 0, gProbeBad = 0;
+unsigned long long gProbeLatSum = 0, gProbeLatMax = 0;
+
+static void fenceProbeAdd(int fd)
+{
+    int d = dup(fd);
+    if (d < 0) {
+        gProbeBad++;
+        return;
+    }
+    pthread_mutex_lock(&gProbeLock);
+    if (gProbeCount >= kProbeSlots) {
+        /* hueco lleno: clasificamos y soltamos el mas viejo */
+        ProbeSlot* old = &gProbe[0];
+        if (old->signed_ms == 0)
+            gProbeLost++;
+        close(old->dupfd);
+        memmove(&gProbe[0], &gProbe[1],
+                (size_t)(gProbeCount - 1) * sizeof(ProbeSlot));
+        gProbeCount--;
+    }
+    gProbe[gProbeCount].dupfd = d;
+    gProbe[gProbeCount].born_ms = nowMs();
+    gProbe[gProbeCount].signed_ms = 0;
+    gProbeCount++;
+    gProbeSeen++;
+    pthread_mutex_unlock(&gProbeLock);
+}
+
+static void* fenceProbeThread(void*)
+{
+    struct pollfd pf[kProbeSlots];
+    int idx[kProbeSlots];
+
+    for (;;) {
+        int n = 0, i, k;
+        unsigned long long now;
+
+        pthread_mutex_lock(&gProbeLock);
+        now = nowMs();
+        for (i = 0; i < gProbeCount; i++) {
+            if (now - gProbe[i].born_ms > (unsigned long long)kProbeMaxAgeMs) {
+                if (gProbe[i].signed_ms == 0)
+                    gProbeLost++;
+                close(gProbe[i].dupfd);
+                gProbe[i] = gProbe[--gProbeCount];
+                i--;
+                continue;
+            }
+            pf[n].fd = gProbe[i].dupfd;
+            pf[n].events = 0x0001;      /* POLLIN */
+            pf[n].revents = 0;
+            idx[n] = i;
+            n++;
+        }
+        pthread_mutex_unlock(&gProbeLock);
+
+        if (n == 0) {
+            struct timespec ts = { 0, 20 * 1000 * 1000 };
+            nanosleep(&ts, nullptr);
+            continue;
+        }
+
+        poll(pf, (unsigned long)n, 50);
+
+        pthread_mutex_lock(&gProbeLock);
+        for (k = 0; k < n; k++) {
+            int pos;
+            unsigned long long t;
+            if ((pf[k].revents & 0x0001) == 0)
+                continue;
+            pos = idx[k];
+            if (pos >= gProbeCount || gProbe[pos].dupfd != pf[k].fd)
+                continue;               /* otra pasada ya lo clasifico */
+            if (gProbe[pos].signed_ms != 0)
+                continue;
+            t = nowMs() - gProbe[pos].born_ms;
+            gProbe[pos].signed_ms = t;
+            gProbeSigned++;
+            gProbeLatSum += t;
+            if (t > gProbeLatMax)
+                gProbeLatMax = t;
+            if ((gProbeSigned % 200u) == 0u)
+                __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                        "sondeo: %u/%u fences senalizados (media %llu ms, max %llu ms, "
+                        "%u nunca senalizados, %u dups fallidos)",
+                        gProbeSigned, gProbeSeen,
+                        gProbeLatSum / (unsigned long long)gProbeSigned,
+                        gProbeLatMax, gProbeLost, gProbeBad);
+        }
+        pthread_mutex_unlock(&gProbeLock);
+    }
+    return nullptr;
+}
+
+static void fenceProbeStart()
+{
+    pthread_attr_t attr;
+    pthread_t th;
+
+    if (gProbeStarted)
+        return;
+    gProbeStarted = true;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&th, &attr, fenceProbeThread, nullptr) != 0)
+        __android_log_print(ANDROID_LOG_WARN, "mocha-hal30",
+                "sondeo: no se pudo crear el hilo recolector (errno %d)", errno);
+    pthread_attr_destroy(&attr);
 }
 
 static unsigned extraFlags() {
     if (gExtraFlags == 0xffffffffu) {
         const char* mode = fenceModeName();
-        if (mode[0] == 'k' && mode[1] == 'e') {            /* keep */
+        if (mode[0] == 'h') {                      /* handoff (defecto) */
+            gCloseFences = 0;
+            gReapFences = 1;          /* el blob se queda el fd; lo cerramos ya senalizado */
+            fenceReapStart();
+        } else if (mode[0] == 'k') {               /* keep: entregar y no cerrar (mide fugas) */
             gCloseFences = 0;
             gReapFences = 0;
         } else if (mode[0] == 'r') {                      /* reap */
@@ -375,11 +539,12 @@ static unsigned extraFlags() {
         } else if (mode[0] == '0' || mode[0] == 'n') {    /* no forzar el flag */
             gCloseFences = 1;
             gReapFences = 0;
-        } else {                                           /* close (defecto) */
+        } else {                                           /* close (control ya medido) */
             gCloseFences = 1;
             gReapFences = 0;
         }
         gExtraFlags = (mode[0] == '0' || mode[0] == 'n') ? 0u : (1u << kFlagSyncFenceFd);
+        fenceProbeStart();      /* el sondeo funciona en todos los modos */
         __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
                 "submit: flags=0x%x; politica de fences=%s (env MOCHA_CAMERA_SYNCFD o "
                 "/data/local/tmp/mocha-syncfd-mode)", gExtraFlags, mode);
@@ -494,6 +659,8 @@ extern "C" int ioctl(int fd, unsigned request, ...) {
          * y devolvemos 0 (= /dev/null, siempre senalado), que es lo que el blob ya
          * tolera sin bloquearse. */
         if (ret == 0 && translated.fence > 2u) {
+            fenceProbeAdd((int)translated.fence);     /* copia nuestra para medir el fence */
+            fenceProbeAdd((int)translated.fence);     /* copia nuestra para medir */
             if (gReapFences) {
                 fenceReapAdd((int)translated.fence);
                 gFencesReaped++;
