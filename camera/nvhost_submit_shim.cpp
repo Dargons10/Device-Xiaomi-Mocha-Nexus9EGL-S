@@ -19,6 +19,8 @@
 #include <dlfcn.h>
 #include <stdlib.h>
 #include <sys/types.h>
+#include <pthread.h>
+#include <time.h>
 
 /* readlink sin arrastrar <unistd.h>: unistd.h activa las dos declaraciones
  * __overloadable de ioctl() de bionic (unsigned / unsigned long), que chocan
@@ -187,19 +189,200 @@ int gFirstFence = -1;
  * Por eso el shim ENCIENDE el flag.  Se puede apagar con MOCHA_CAMERA_SYNCFD=0 en
  * el entorno del provider para comparar.
  */
+/*
+ * Politicas posibles para el fd de sync fence que devuelve el kernel, seleccionables
+ * sin recompilar (el provider lee el entorno y, si no esta, /data/local/tmp/mocha-syncfd-mode):
+ *
+ *   close (defecto)  cerrar el fd justo despues del submit y entregar 0 al blob.
+ *   keep              entregar el fd real y no cerrarlo (fuga de fds: solo para medir).
+ *   reap              entregar el fd real y cerrarlo cuando el kernel lo senala, desde un
+ *                     hilo propio con poll().  Es la politica que queremos si el pipeline de
+ *                     nvmm_camera usa ese fd para senalar sus semaforos de frame.
+ *   0 / noflag        no encender NVHOST_SUBMIT_FLAG_SYNC_FENCE_FD (vuelve al comportamiento
+ *                     de umbral-entero que causaba los 2000 ms de 'Fence::wait').
+ *
+ * Medido 2026-11-01 14:10 con la politica 'close': 5.348 submits, 126.500 fences cerrados, 0
+ * 'Fence timed out' y 701 constructCaptureResult, pero ~455.000 esperas de semaforo fallidas
+ * ('Waiting on the syncpt semaphore failed 0x2' vive en libnvmm_camera/libnvmm_camera_v3, que
+ * importa NvOsSemaphoreWaitTimeout y tambien NvRmFenceSignalSemaphore).  Si el blob registra el
+ * fence del submit para senalar sus semaforos, entregarle 0 (un fd invalido para registrar)
+ * explicaria que nunca reciba la senal y inunde el log.  'reap' mantiene el fd valido sin fugarse.
+ */
+constexpr int kMaxOpenFences = 64;
+constexpr int kFenceMaxAgeMs = 1500;
+
+/* struct pollfd y poll() declarados a mano: <poll.h> no esta incluido a proposito (ver el
+ * comentario del readlink).  El layout es el del kernel/bionic. */
+struct pollfd {
+    int fd;
+    short events;
+    short revents;
+};
+extern "C" int poll(struct pollfd* __array, unsigned long __nfds, int __timeout);
+
+struct OpenFence {
+    int fd;
+    unsigned long long born_ms;
+};
+
+OpenFence gOpenFences[kMaxOpenFences];
+int gOpenFenceCount = 0;
+pthread_mutex_t gOpenLock = PTHREAD_MUTEX_INITIALIZER;
+unsigned gReaperSignaled = 0;
+unsigned gReaperAged = 0;
+bool gReaperStarted = false;
+
+static unsigned long long nowMs()
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (unsigned long long)ts.tv_sec * 1000ull +
+           (unsigned long long)ts.tv_nsec / 1000000ull;
+}
+
+static void fenceReapAdd(int fd)
+{
+    pthread_mutex_lock(&gOpenLock);
+    if (gOpenFenceCount >= kMaxOpenFences) {
+        /* el mas viejo primero: si el pipeline va mas rapido que el reaper, no debemos
+         * acumular descriptores */
+        close(gOpenFences[0].fd);
+        gReaperAged++;
+        memmove(&gOpenFences[0], &gOpenFences[1],
+                (size_t)(gOpenFenceCount - 1) * sizeof(OpenFence));
+        gOpenFenceCount--;
+    }
+    gOpenFences[gOpenFenceCount].fd = fd;
+    gOpenFences[gOpenFenceCount].born_ms = nowMs();
+    gOpenFenceCount++;
+    pthread_mutex_unlock(&gOpenLock);
+}
+
+static void* fenceReaperThread(void*)
+{
+    struct pollfd pf[kMaxOpenFences];
+    int idx[kMaxOpenFences];
+
+    for (;;) {
+        int n = 0;
+        unsigned long long now;
+        int i, k;
+
+        pthread_mutex_lock(&gOpenLock);
+        now = nowMs();
+        for (i = 0; i < gOpenFenceCount; i++) {
+            if (now - gOpenFences[i].born_ms > (unsigned long long)kFenceMaxAgeMs) {
+                close(gOpenFences[i].fd);
+                gReaperAged++;
+                gOpenFences[i] = gOpenFences[--gOpenFenceCount];
+                i--;
+                continue;
+            }
+            pf[n].fd = gOpenFences[i].fd;
+            pf[n].events = 0;
+            pf[n].revents = 0;
+            idx[n] = i;
+            n++;
+        }
+        pthread_mutex_unlock(&gOpenLock);
+
+        if (n == 0) {
+            struct timespec ts = { 0, 20 * 1000 * 1000 };
+            nanosleep(&ts, nullptr);
+            continue;
+        }
+
+        poll(pf, (unsigned long)n, 200);
+
+        pthread_mutex_lock(&gOpenLock);
+        for (k = 0; k < n; k++) {
+            int pos;
+            if (pf[k].revents == 0)
+                continue;
+            pos = idx[k];
+            if (pos >= gOpenFenceCount || gOpenFences[pos].fd != pf[k].fd)
+                continue;   /* ya lo cerro otra ruta */
+            close(gOpenFences[pos].fd);
+            gReaperSignaled++;
+            gOpenFences[pos] = gOpenFences[--gOpenFenceCount];
+            if ((gReaperSignaled % 500u) == 0u)
+                __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                        "reap: %u fences senalados y cerrados (%u por antiguedad, %u abiertos)",
+                        gReaperSignaled, gReaperAged, gOpenFenceCount);
+        }
+        pthread_mutex_unlock(&gOpenLock);
+    }
+    return nullptr;
+}
+
+static void fenceReapStart()
+{
+    pthread_attr_t attr;
+    pthread_t th;
+
+    if (gReaperStarted)
+        return;
+    gReaperStarted = true;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&th, &attr, fenceReaperThread, nullptr) != 0)
+        __android_log_print(ANDROID_LOG_WARN, "mocha-hal30",
+                "reap: no se pudo crear el hilo recolector (errno %d)", errno);
+    pthread_attr_destroy(&attr);
+}
+
 unsigned gExtraFlags = 0xffffffffu;
-int gCloseFences = -1;          /* -1 sin decidir, 1 cerrar, 0 conservar */
+int gCloseFences = -1;          /* 1 cerrar, 0 entregar el fd real */
+int gReapFences = 0;
 unsigned gFencesClosed = 0;
 unsigned gFencesKept = 0;
+unsigned gFencesReaped = 0;
+
+static const char* fenceModeName()
+{
+    static const char* mode = nullptr;
+    if (mode == nullptr) {
+        mode = getenv("MOCHA_CAMERA_SYNCFD");
+        if (mode == nullptr || mode[0] == '\0') {
+            FILE* f = fopen("/data/local/tmp/mocha-syncfd-mode", "r");
+            static char buf[32];
+            if (f != nullptr) {
+                if (fgets(buf, sizeof(buf), f) != nullptr) {
+                    size_t len = strlen(buf);
+                    while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
+                        buf[--len] = '\0';
+                    mode = buf;
+                }
+                fclose(f);
+            }
+        }
+        if (mode == nullptr || mode[0] == '\0')
+            mode = "close";
+    }
+    return mode;
+}
 
 static unsigned extraFlags() {
     if (gExtraFlags == 0xffffffffu) {
-        const char* mode = getenv("MOCHA_CAMERA_SYNCFD");
-        gCloseFences = (mode != nullptr && mode[0] == 'k') ? 0 : 1;   /* 'keep' = conservar */
-        gExtraFlags = (mode != nullptr && mode[0] == '0') ? 0u : (1u << kFlagSyncFenceFd);
+        const char* mode = fenceModeName();
+        if (mode[0] == 'k' && mode[1] == 'e') {            /* keep */
+            gCloseFences = 0;
+            gReapFences = 0;
+        } else if (mode[0] == 'r') {                      /* reap */
+            gCloseFences = 0;
+            gReapFences = 1;
+            fenceReapStart();
+        } else if (mode[0] == '0' || mode[0] == 'n') {    /* no forzar el flag */
+            gCloseFences = 1;
+            gReapFences = 0;
+        } else {                                           /* close (defecto) */
+            gCloseFences = 1;
+            gReapFences = 0;
+        }
+        gExtraFlags = (mode[0] == '0' || mode[0] == 'n') ? 0u : (1u << kFlagSyncFenceFd);
         __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
-                "submit: flags=0x%x anadido a los submits del blob; modo=%s",
-                gExtraFlags, gCloseFences ? "cerrar el fence despues del submit" : "keep");
+                "submit: flags=0x%x; politica de fences=%s (env MOCHA_CAMERA_SYNCFD o "
+                "/data/local/tmp/mocha-syncfd-mode)", gExtraFlags, mode);
     }
     return gExtraFlags;
 }
@@ -218,9 +401,24 @@ static unsigned extraFlags() {
  */
 constexpr int kCacheSize = 256;
 int gFdKind[kCacheSize];   /* 0 desconocido, 1 nvhost, 2 otro */
+char gFdName[kCacheSize][24];
 unsigned gIoctlLogged = 0;
 unsigned gIoctlOther = 0;
 unsigned gIoctlFailed = 0;
+
+/* Histograma de ioctls nvhost por numero de peticion.  Con un solo contador global no
+ * distinguimos QUE espera el blob: el flood 'Waiting on the syncpt semaphore failed' ocurre
+ * mientras este shim ve 309 ioctls fallidas de 200.001, o sea que las esperas que fallan no
+ * son ioctls.  El histograma muestra que cmds emite cada nodo y con que exito. */
+struct IoctlStat {
+    unsigned request;
+    unsigned count;
+    unsigned fails;
+    int fd;
+};
+constexpr int kIoctlStatSlots = 48;
+IoctlStat gIoctlStats[kIoctlStatSlots];
+int gIoctlStatCount = 0;
 
 }  // namespace
 
@@ -238,6 +436,7 @@ static int fdKind(int fd) {
     }
     name[n] = '\0';
     gFdKind[fd] = strstr(name, "nvhost") ? 1 : 2;
+    snprintf(gFdName[fd], sizeof(gFdName[fd]), "%s", name);
     if (gFdKind[fd] == 1 && gIoctlLogged < 40u)
         __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
                             "fd %d es %s -> se trazan sus ioctl", fd, name);
@@ -285,6 +484,7 @@ extern "C" int ioctl(int fd, unsigned request, ...) {
         translated.fences = legacy->fences;
 
         int ret = gRealIoctl(fd, kCurrentRequest, &translated);
+        gTranslations++;
 
         /* El kernel nos devolvio un fd de sync fence.  El blob de 2015 trata ese
          * campo como un entero: lo mete en estructuras internas y NUNCA lo cierra
@@ -293,22 +493,36 @@ extern "C" int ioctl(int fd, unsigned request, ...) {
          * Fence::wait que vemos son sobre fd 0 y fd -1.  Asi que lo cerramos aqui
          * y devolvemos 0 (= /dev/null, siempre senalado), que es lo que el blob ya
          * tolera sin bloquearse. */
-        if (ret == 0 && gCloseFences && translated.fence > 2u) {
-            close((int)translated.fence);
-            translated.fence = 0;
-            gFencesClosed++;
-            if (gFencesClosed == 1u || (gFencesClosed % 500u) == 0u)
-                __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
-                        "submit: %u fences del kernel cerrados tras el submit", gFencesClosed);
-        } else if (translated.fence > 2u) {
-            gFencesKept++;
+        if (ret == 0 && translated.fence > 2u) {
+            if (gReapFences) {
+                fenceReapAdd((int)translated.fence);
+                gFencesReaped++;
+                if (gFencesReaped == 1u || (gFencesReaped % 500u) == 0u)
+                    __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                            "submit: %u fences entregados al blob y en recoleccion "
+                            "(%u ya senalados y cerrados, %u abiertos ahora)",
+                            gFencesReaped, gReaperSignaled, gOpenFenceCount);
+            } else if (gCloseFences) {
+                close((int)translated.fence);
+                translated.fence = 0;
+                gFencesClosed++;
+                if (gFencesClosed == 1u || (gFencesClosed % 500u) == 0u)
+                    __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                            "submit: %u fences del kernel cerrados tras el submit", gFencesClosed);
+            } else {
+                gFencesKept++;
+                if (gFencesKept == 1u || (gFencesKept % 500u) == 0u)
+                    __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                            "submit: %u fences entregados sin cerrar (solo para medir)",
+                            gFencesKept);
+            }
         }
 
         /* The kernel wrote the fence into our struct; the caller expects it
          * at the very same offset in both layouts, but copy it explicitly. */
         legacy->fence = translated.fence;
 
-        if (gTranslations < 12u) {
+        if (gTranslations <= 12u || (gTranslations % 500u) == 0u) {
             const SyncptIncr* incrs =
                     (const SyncptIncr*)(uintptr_t)legacy->syncpt_incrs;
             char sp[128];
@@ -318,9 +532,19 @@ extern "C" int ioctl(int fd, unsigned request, ...) {
 
             sp[0] = '\0';
             if (incrs != nullptr && n <= 8u) {
-                for (i = 0; i < n; i++)
-                    len += snprintf(sp + len, sizeof(sp) - (size_t)len,
-                            " %u:+%u", incrs[i].syncpt_id, incrs[i].incrs);
+                for (i = 0; i < n; i++) {
+                    int room = (int)sizeof(sp) - len - 1;
+                    int w;
+                    if (room < 12)
+                        break;
+                    w = snprintf(sp + len, (size_t)room + 1, " %u:+%u",
+                            incrs[i].syncpt_id, incrs[i].incrs);
+                    if (w < 0)
+                        break;
+                    len += (w < room) ? w : room;
+                    if (w >= room)
+                        break;
+                }
             } else {
                 snprintf(sp, sizeof(sp), " ?");
             }
@@ -346,6 +570,26 @@ extern "C" int ioctl(int fd, unsigned request, ...) {
 
     if (ret != 0)
         gIoctlFailed++;
+
+    {
+        int slot = -1, i;
+        for (i = 0; i < gIoctlStatCount; i++) {
+            if (gIoctlStats[i].request == request) { slot = i; break; }
+        }
+        if (slot < 0 && gIoctlStatCount < kIoctlStatSlots) {
+            slot = gIoctlStatCount++;
+            gIoctlStats[slot].request = request;
+            gIoctlStats[slot].count = 0;
+            gIoctlStats[slot].fails = 0;
+            gIoctlStats[slot].fd = fd;
+        }
+        if (slot >= 0) {
+            gIoctlStats[slot].count++;
+            if (ret != 0)
+                gIoctlStats[slot].fails++;
+        }
+    }
+
     if (gIoctlLogged < 60u) {
         gIoctlLogged++;
         __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
@@ -357,9 +601,40 @@ extern "C" int ioctl(int fd, unsigned request, ...) {
                 argp, ret == 0 ? "ok" : "FALLO", ret == 0 ? "" : strerror(errno));
     } else {
         gIoctlOther++;
-        if ((gIoctlOther % 5000u) == 1u)
+        if ((gIoctlOther % 5000u) == 1u) {
+            int top[kIoctlStatSlots];
+            int n = gIoctlStatCount, i, j, k;
+
             __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
-                    "ioctl nvhost: %u llamadas mas (%u fallidas)", gIoctlOther, gIoctlFailed);
+                    "ioctl nvhost: %u llamadas mas (%u fallidas); cmds mas usados:",
+                    gIoctlOther, gIoctlFailed);
+            if (n > 4)
+                n = 4;
+            for (i = 0; i < n; i++)
+                top[i] = i;
+            for (i = 1; i < n; i++) {                 /* insercion, n <= 4 */
+                int v = top[i];
+                j = i - 1;
+                while (j >= 0 && gIoctlStats[top[j]].count < gIoctlStats[v].count) {
+                    top[j + 1] = top[j];
+                    j--;
+                }
+                top[j + 1] = v;
+            }
+            /* una linea por cmd: concatenar en un buffer fijo hacia que snprintf devolviera
+             * la longitud deseada, len se pasara del tamano y el fortify abortaba el provider */
+            for (k = 0; k < n; k++) {
+                const IoctlStat* st = &gIoctlStats[top[k]];
+                __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                        "   fd=%d%s cmd=0x%08x nr=%u dir=%u tam=%u x=%u fallas=%u",
+                        st->fd,
+                        (st->fd >= 3 && st->fd < kCacheSize) ? gFdName[st->fd] : "",
+                        st->request, st->request & 0xffu,
+                        (st->request >> kIocDirShift) & 0x3u,
+                        (st->request >> kIocSizeShift) & 0x3fffu,
+                        st->count, st->fails);
+            }
+        }
     }
     return ret;
 }
