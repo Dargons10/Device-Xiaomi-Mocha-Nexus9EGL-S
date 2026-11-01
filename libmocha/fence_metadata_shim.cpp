@@ -73,6 +73,45 @@ static int fdIsSyncFence(int fd, char *name, size_t nameSize) {
     return 0;
 }
 
+/*
+ * Que libreria y que offset llamo a esta funcion.
+ *
+ * El blob de 2015 enlaza android::Fence como simbolo undefined, o sea que su
+ * constructor pasa por aqui: registrando la direccion de retorno sabemos QUIEN
+ * construye un Fence con un fd que no es un fence (medido: fd 1, el pipe de
+ * stdout del provider, 2026-11-01 10:37).  Sin eso no hay forma de saber si el
+ * fd sale de un handle de gralloc, de un ioctl de nvhost o de una cola interna
+ * de NVIDIA.
+ */
+static void describeCaller(void *ret, char *out, size_t outSize) {
+    unsigned long addr = (unsigned long)ret;
+    out[0] = '\0';
+    FILE *f = ::fopen("/proc/self/maps", "r");
+    if (!f)
+        return;
+    char line[512];
+    while (::fgets(line, sizeof(line), f)) {
+        unsigned long lo = 0, hi = 0;
+        if (::sscanf(line, "%lx-%lx", &lo, &hi) != 2)
+            continue;
+        if (addr < lo || addr >= hi)
+            continue;
+        const char *name = line;
+        size_t i = 0;
+        while (i < sizeof(line) && line[i]) {
+            if (line[i] == '/' || (line[i] == '-' && i + 1 < sizeof(line) && line[i + 1] == '>')) {
+                name = line + i;
+                break;
+            }
+            i++;
+        }
+        size_t nameLen = ::strcspn(name, "\n");
+        ::snprintf(out, outSize, "%.*s+0x%lx", (int)nameLen, name, addr - lo);
+        break;
+    }
+    ::fclose(f);
+}
+
 /* Traza limitada: el HAL abre muchos fences por segundo. */
 static void fenceTrace(const char *fmt, ...) {
     static unsigned budget = 40;
@@ -101,6 +140,35 @@ static void fenceTrace(const char *fmt, ...) {
  * virtual methods), so polling that fd for POLLIN is exactly what the
  * legacy implementation did on top of a sync_file fd.
  */
+/*
+ * android::Fence::Fence(int fenceFd)
+ *
+ * Android 12 si exporta este constructor, pero el blob lo resolvia contra otra
+ * firma; mientras nosotros lo implementamos podemos mirar el fd ANTES de que el
+ * HAL lo use.  Dos cosas importan aqui:
+ *   1) saber quien lo construye (describeCaller) porque fd 1 no puede salir de
+ *      ningun sitio legitimo, y
+ *   2) no dejar que un fd de stdio entre en un Fence: el destructor propio
+ *      (_ZN7android5FenceD1Ev) cierra el fd, y cerrar el 1 del provider cierra
+ *      su pipe de log; a partir de ahi cualquier open() puede quedarse con el 1
+ *      y el HAL acabara usando stdout como si fuera un buffer o un fence.
+ */
+extern "C" void _ZN7android5FenceC1Ei(int *self, int fd) {
+    char name[128], caller[220];
+    int isFence = fdIsSyncFence(fd, name, sizeof(name));
+    describeCaller(__builtin_return_address(0), caller, sizeof(caller));
+    if (fd >= 0 && fd <= STDERR_FILENO)
+        fenceTrace("Fence(fd %d): ES UN FD DE STDIO (%s), se sustituye por -1. Llamador: %s",
+                   fd, isFence == 0 ? name : "sin readlink", caller[0] ? caller : "?");
+    else if (isFence != 1)
+        fenceTrace("Fence(fd %d) NO es un fence del kernel (%s). Llamador: %s",
+                   fd, isFence == 0 ? name : "readlink fallo", caller[0] ? caller : "?");
+    else
+        fenceTrace("Fence(fd %d) es un fence real (%s). Llamador: %s",
+                   fd, name, caller[0] ? caller : "?");
+    *self = (fd >= 0 && fd <= STDERR_FILENO) ? -1 : fd;
+}
+
 extern "C" int _ZN7android5Fence4waitEj(int *self, unsigned int timeOutMs) {
     int fd = *self;
     if (fd < 0)
@@ -156,7 +224,11 @@ extern "C" int _ZN7android5Fence4waitEj(int *self, unsigned int timeOutMs) {
  */
 extern "C" void _ZN7android5FenceD1Ev(int *self) {
     int fd = *self;
-    if (fd >= 0)
+    /* Nunca cerrar stdio: el destructor de Fence es el unico sitio donde el blob
+     * de 2015 cierra el fd, y si el fd resulto ser 1 (el pipe de log del
+     * provider) cerrar aqui deja al proceso sin stdout y con la puerta abierta a
+     * que el proximo open() reutilice ese numero. */
+    if (fd > STDERR_FILENO)
         ::close(fd);
     *self = -1;
 }

@@ -17,6 +17,12 @@
 #define _GNU_SOURCE
 
 #include <dlfcn.h>
+#include <sys/types.h>
+
+/* readlink sin arrastrar <unistd.h>: unistd.h activa las dos declaraciones
+ * __overloadable de ioctl() de bionic (unsigned / unsigned long), que chocan
+ * con nuestra definicion de ioctl. */
+extern "C" ssize_t readlink(const char* __path, char* __buf, size_t __bufsize);
 #include <stdio.h>
 #include <errno.h>
 #include <stdarg.h>
@@ -157,7 +163,45 @@ IoctlFn gRealIoctl = nullptr;
 unsigned gTranslations = 0;
 int gFirstFence = -1;
 
+/*
+ * Traza de TODOS los ioctl sobre nodos nvhost, medida 2026-11-01 10:52: el shim
+ * no vio NI UN submit (submit#=0) en una sesion de camara completa, mientras el
+ * kernel inundaba el log con 'Waiting on the syncpt semaphore failed' y el
+ * preview salia negro.  Hay dos explicaciones posibles y esta traza las separa:
+ *   a) el blob nunca llega a SUBMIT (el pipeline VI no arranca) -> los waits fallan
+ *      porque nadie incrementa los syncpt,
+ *   b) el blob llama a ioctl() por una ruta que no pasa por este simbolo
+ *      (syscall(__NR_ioctl) dentro de libnvos.so), y aqui no vemos nada aunque
+ *      los submits si ocurran.
+ * Los dos casos se distinguen mirando QUE ioctls llegan y con que resultado.
+ */
+constexpr int kCacheSize = 256;
+int gFdKind[kCacheSize];   /* 0 desconocido, 1 nvhost, 2 otro */
+unsigned gIoctlLogged = 0;
+unsigned gIoctlOther = 0;
+unsigned gIoctlFailed = 0;
+
 }  // namespace
+
+static int fdKind(int fd) {
+    if (fd < 3 || fd >= kCacheSize)
+        return 0;
+    if (gFdKind[fd] != 0)
+        return gFdKind[fd];
+    char path[64], name[128];
+    snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+    ssize_t n = readlink(path, name, sizeof(name) - 1);
+    if (n <= 0) {
+        gFdKind[fd] = 2;
+        return 2;
+    }
+    name[n] = '\0';
+    gFdKind[fd] = strstr(name, "nvhost") ? 1 : 2;
+    if (gFdKind[fd] == 1 && gIoctlLogged < 40u)
+        __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                            "fd %d es %s -> se trazan sus ioctl", fd, name);
+    return gFdKind[fd];
+}
 
 /* bionic declares "int ioctl(int, unsigned, ...)" (bits/ioctl.h); on a 32 bit
  * build int/unsigned/unsigned long are all 32 bit registers, so the calling
@@ -232,10 +276,31 @@ extern "C" int ioctl(int fd, unsigned request, ...) {
                     legacy->flags, ret == 0 ? "ok" : "FAILED",
                     (int)translated.fence, kLegacyRequest, kCurrentRequest);
         }
-        gTranslations++;
         gFirstFence = (int)translated.fence;
         return ret;
     }
 
-    return gRealIoctl(fd, request, argp);
+    int ret = gRealIoctl(fd, request, argp);
+    bool esNvhost = (fdKind(fd) == 1) || (((request >> kIocTypeShift) & 0xffu) == kNvhostMagic);
+    if (!esNvhost)
+        return ret;
+
+    if (ret != 0)
+        gIoctlFailed++;
+    if (gIoctlLogged < 60u) {
+        gIoctlLogged++;
+        __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                "ioctl fd=%d cmd=0x%08x dir=%u tam=%u nr=%u arg=%p -> %s%s",
+                fd, request,
+                (request >> kIocDirShift) & 0x3u,
+                (request >> kIocSizeShift) & 0x3fffu,
+                request & 0xffu,
+                argp, ret == 0 ? "ok" : "FALLO", ret == 0 ? "" : strerror(errno));
+    } else {
+        gIoctlOther++;
+        if ((gIoctlOther % 5000u) == 1u)
+            __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                    "ioctl nvhost: %u llamadas mas (%u fallidas)", gIoctlOther, gIoctlFailed);
+    }
+    return ret;
 }
