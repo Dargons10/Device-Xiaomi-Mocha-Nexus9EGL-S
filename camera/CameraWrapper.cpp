@@ -56,51 +56,80 @@ static pthread_t thr;
 
 static void *thread_func(void*)
 {
+    /* 2026-11-02: Correccion del limitador. Antes leiamos hasta 511 bytes y tratabamos ese
+     * bloque como SI FUERA UNA LINEA. Con mensajes de ~47 bytes, un bloque metia ~10 mensajes
+     * de golpe: el techo de CAM_LOG_MAX_PER_SEC se contaba por bloque (no por linea) y el
+     * dedupe comparaba bloques distintos, asi que fallaba. Medido: 2.246 lineas/s con tag
+     * 'CameraWrapper' cuando el techo decia 200/s, y en total 110.966 'repetidas' que igualmente
+     * se reenviaban por otras partes.
+     * Ahora se acumula y se procesa linea a linea: el techo y la deduplicacion funcionan de
+     * verdad sobre lineas reales.
+     */
     ssize_t rdsz;
+    char chunk[1024];
+    static char acc[4096];
+    size_t acclen = 0;
     char buf[512];
     static char last[512];
     static unsigned repeats;
     static struct timespec t_last;
     static unsigned emitted;
 
-    while((rdsz = read(pfd[0], buf, sizeof buf - 1)) > 0) {
-        if(buf[rdsz - 1] == '\n') --rdsz;
-        buf[rdsz] = 0;  /* add null-terminator */
+    while((rdsz = read(pfd[0], chunk, sizeof chunk)) > 0) {
+        if (acclen + (size_t) rdsz >= sizeof acc) {
+            /* Acumulador lleno: tiramos lo acumulado (lineas enormes del HAL) y reiniciamos. */
+            acclen = 0;
+        }
+        memcpy(acc + acclen, chunk, (size_t) rdsz);
+        acclen += (size_t) rdsz;
 
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        if (now.tv_sec != t_last.tv_sec) {
+        size_t start = 0;
+        for (size_t i = 0; i < acclen; i++) {
+            if (acc[i] != '\n')
+                continue;
+            acc[i] = 0;
+            snprintf(buf, sizeof buf, "%s", acc + start);
+            start = i + 1;
+
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            if (now.tv_sec != t_last.tv_sec) {
+                if (repeats) {
+                    __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG,
+                                        "[limite] linea anterior repetida %u veces", repeats);
+                    repeats = 0;
+                }
+                if (emitted > CAM_LOG_MAX_PER_SEC) {
+                    __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG,
+                                        "[limite] %u lineas mas descartadas en el segundo",
+                                        emitted - CAM_LOG_MAX_PER_SEC);
+                }
+                emitted = 0;
+                t_last = now;
+            }
+
+            if (strcmp(buf, last) == 0) {
+                repeats++;
+                emitted++;
+                continue;
+            }
+
             if (repeats) {
                 __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG,
                                     "[limite] linea anterior repetida %u veces", repeats);
                 repeats = 0;
             }
-            if (emitted >= CAM_LOG_MAX_PER_SEC) {
-                __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG,
-                                    "[limite] %u lineas mas descartadas en el segundo",
-                                    emitted - CAM_LOG_MAX_PER_SEC);
+
+            if (emitted < CAM_LOG_MAX_PER_SEC) {
+                __android_log_write(ANDROID_LOG_DEBUG, LOG_TAG, buf);
             }
-            emitted = 0;
-            t_last = now;
-        }
-
-        if (strcmp(buf, last) == 0) {
-            repeats++;
             emitted++;
-            continue;
+            snprintf(last, sizeof last, "%s", buf);
         }
-
-        if (repeats) {
-            __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG,
-                                "[limite] linea anterior repetida %u veces", repeats);
-            repeats = 0;
+        if (start > 0) {
+            memmove(acc, acc + start, acclen - start);
+            acclen -= start;
         }
-
-        if (emitted < CAM_LOG_MAX_PER_SEC) {
-            __android_log_write(ANDROID_LOG_DEBUG, LOG_TAG, buf);
-        }
-        emitted++;
-        snprintf(last, sizeof last, "%s", buf);
     }
     return 0;
 }

@@ -99,6 +99,11 @@ LOCAL_PROPRIETARY_MODULE := true
 LOCAL_MODULE := libmocha_cpp_shim
 LOCAL_MODULE_TAGS := optional
 LOCAL_CPPFLAGS := -fexceptions
+# Trazas de los semaforos internos del blob (NvOsSemaphore*): interponerlos funciona
+# (camera.vendor.tegra.so resuelve sus PLT contra este modulo) pero cambia el timing del
+# pipeline - con -DMOCHA_SEM_TRACE activo el flood de 'syncpt semaphore' desaparece y con
+# el desaparecen tambien los frames. Dejar OFF salvo investigacion.
+#LOCAL_CFLAGS += -DMOCHA_SEM_TRACE
 include $(BUILD_SHARED_LIBRARY)
 
 include $(CLEAR_VARS)

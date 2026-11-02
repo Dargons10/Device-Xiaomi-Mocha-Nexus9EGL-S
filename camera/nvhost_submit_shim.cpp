@@ -167,6 +167,50 @@ struct SyncptIncr {   /* struct nvhost_syncpt_incr in the kernel */
     uint32_t incrs;
 };
 
+/* ---- trazado del lado de ESPERA de syncpoint -------------------------------
+ * Medido con el kernel #19 (handoff, 14 s): 2.500 fences del submit entregados,
+ * 2.489 senalizados por el kernel (media 32 ms, max 95 ms) y el flood 'Waiting on
+ * the syncpt semaphore failed' se queda en 111.656 lineas - 113.276 con el kernel
+ * #16 y 101.561 con 'close'.  El flood NO depende de que el fence del submit se
+ * entregue, se cierre o se ceda.  Lo que falla es otro camino: las esperas de
+ * syncpoint, que hasta ahora pasaban por aqui sin decodificar.
+ *
+ * NVHOST_IOCTL_MAGIC 'H' reutiliza numeros entre el nodo de control y los canales,
+ * asi que el numero solo se interpreta sabiendo QUE nodo es el fd:
+ *   /dev/nvhost-ctrl : 1 READ, 3 WAIT, 6 WAITEX, 8 READ_MAX, 9 WAITMEX,
+ *                      10 FENCE_CREATE (32 bit), 11 FENCE_CREATE (64 bit)
+ *   canales          : 2 GET_SYNCPOINTS, 3 GET_WAITBASES, 16 GET_SYNCPOINT,
+ *                      17 GET_WAITBASE, 15/26 SUBMIT
+ * Solo decodificamos cuando el tamano codificado en el ioctl cubre la estructura
+ * nuestra: si el blob pasa una version mas antigua, no leemos fuera de su buffer.
+ */
+struct CtrlRead    { uint32_t id, value; };
+struct CtrlWait    { uint32_t id, thresh; int32_t timeout; };
+struct CtrlWaitex  { uint32_t id, thresh; int32_t timeout; uint32_t value; };
+struct CtrlWaitmex { uint32_t id, thresh; int32_t timeout; uint32_t value;
+                     uint32_t tv_sec, tv_nsec, reserved_1, reserved_2; };
+struct CtrlFence32 { uint32_t num_pts, pad; uint64_t pts, name; int32_t fence_fd; };
+struct SyncptInfo  { uint32_t id, thresh; };
+struct ChanParam   { uint32_t param, value; };
+
+constexpr int kWaitSlots = 40;
+struct WaitStat {
+    int nr;
+    uint32_t key;        /* syncpt (esperas) o param (asignaciones de canal) */
+    uint32_t lo, hi;     /* umbral pedido, o valor leido en READ/READ_MAX */
+    uint32_t n, fails;
+    uint32_t fences;     /* fences creados sobre este syncpt */
+    int32_t lastErr;
+    int fd;
+};
+WaitStat gWaitStats[kWaitSlots];
+int gWaitStatCount = 0;
+unsigned gWaitTotal = 0;
+unsigned gWaitLogged = 0;
+unsigned gFenceCreateLogged = 0;
+
+constexpr uint32_t kNoKey = 0xffffffffu;
+
 IoctlFn gRealIoctl = nullptr;
 unsigned gTranslations = 0;
 int gFirstFence = -1;
@@ -608,9 +652,668 @@ static int fdKind(int fd) {
     return gFdKind[fd];
 }
 
+/* ---- semaforos internos del blob --------------------------------------------
+ * El texto 'Waiting on the syncpt semaphore failed 0x2' lo imprime el blob, y el
+ * semaforo en cuestion es un NvOsSemaphore: libnvmm_camera_v3.so importa
+ *   NvOsSemaphoreCreate / Wait / WaitTimeout / Signal / Destroy
+ *   NvRmFenceSignalSemaphore        <- 'senala este semaforo cuando senale este fence'
+ * y los resuelve por PLT, o sea que podemos verlos sin tocar el blob.
+ *
+ * Medido con el volcado de syncpoints: las esperas de KERNEL (CTRL_SYNCPT_WAITEX,
+ * nr=6) funcionan todas - 1.933 esperas sobre los syncpt 6, 19, 21, 22, 23, 24, 25,
+ * 30 y 31 con 0 fallos y umbrales que avanzan (24: 15..870, 30: 14..2043) - mientras
+ * GET_WAITBASE (nr=17, param 0) falla 24/24 con EINVAL sobre /dev/camera.pcl porque
+ * bus_client.c hace '!pdata->waitbases[0]' para el nodo de camera.
+ * Este trazado responde la pregunta que falta: cuantos semaforos espera el blob, con
+ * que plazo, y si alguien los senala alguna vez.
+ */
+static void* semSym(const char* name) {
+    /* RTLD_NEXT primero; si libnvos se cargo antes que nosotros, buscarla por su
+     * handle: dlsym(handle) devuelve la definicion de ESE modulo, no la nuestra
+     * (con RTLD_DEFAULT caeriamos en nuestra propia funcion y hariamos recursion). */
+    void* s = dlsym(RTLD_NEXT, name);
+    if (s != nullptr)
+        return s;
+    void* h = dlopen("libnvos.so", RTLD_NOLOAD | RTLD_NOW);
+    if (h != nullptr)
+        s = dlsym(h, name);
+    return s;
+}
+
+/* Medido: interponer estas funciones Cambia el timing del pipeline - en una sesion con
+ * la interposicion activada el flood desaparecio (0 lineas) pero tambien desaparecieron
+ * los frames (constructCaptureResult=0, process_capture_request=0) y un unico semafaro
+ * (handle 0xafa384a0) giro 44 millones de veces con esperas 'sin plazo' que volvan
+ * inmediatamente con exito (0) y solo 7 seales en toda la sesion.
+ * O sea: sirve para DIAGNOSTICAR pero no debe estar activo en el build normal.
+ * Se encade con -DMOCHA_SEM_TRACE (ver Android.mk).
+ */
+#ifdef MOCHA_SEM_TRACE
+typedef void* NvSemaphore;
+typedef int (*SemCreateFn)(NvSemaphore*);
+typedef int (*SemWaitFn)(NvSemaphore);
+typedef int (*SemWaitTimeoutFn)(NvSemaphore, unsigned);
+typedef void (*SemSignalFn)(NvSemaphore);
+typedef void (*SemDestroyFn)(NvSemaphore);
+
+SemCreateFn gSemCreate = nullptr;
+SemWaitFn gSemWait = nullptr;
+SemWaitTimeoutFn gSemWaitTimeout = nullptr;
+SemSignalFn gSemSignal = nullptr;
+SemDestroyFn gSemDestroy = nullptr;
+
+unsigned gSemWaits = 0;          /* Wait + WaitTimeout */
+unsigned gSemWaitFails = 0;
+unsigned gSemSignals = 0;
+unsigned gSemCreated = 0;
+unsigned gSemLogged = 0;
+unsigned gSemTimeoutBuckets[6];  /* 0, 1..999, 1000..1999, 2000..4999, 5000..1e6, >1e6 */
+unsigned gSemMinUs = 0xffffffffu;
+unsigned gSemMaxUs = 0;
+
+static void semBucket(unsigned us) {
+    if (us == 0)
+        gSemTimeoutBuckets[0]++;
+    else if (us < 1000)
+        gSemTimeoutBuckets[1]++;
+    else if (us < 2000)
+        gSemTimeoutBuckets[2]++;
+    else if (us < 5000)
+        gSemTimeoutBuckets[3]++;
+    else if (us <= 1000000)
+        gSemTimeoutBuckets[4]++;
+    else
+        gSemTimeoutBuckets[5]++;
+    if (us < gSemMinUs)
+        gSemMinUs = us;
+    if (us > gSemMaxUs)
+        gSemMaxUs = us;
+}
+
+static void dumpSemaphores(const char* why) {
+    __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+            "semaforos NvOs (%s): %u esperas (%u fallidas), %u seiales, %u creados; "
+            "us min=%u max=%u",
+            why, gSemWaits, gSemWaitFails, gSemSignals, gSemCreated,
+            gSemMinUs == 0xffffffffu ? 0u : gSemMinUs, gSemMaxUs);
+    __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+            "   plazos pedidos: 0us=%u  1..999us=%u  1..2ms=%u  2..5ms=%u  5..1000ms=%u  >1000ms=%u",
+            gSemTimeoutBuckets[0], gSemTimeoutBuckets[1], gSemTimeoutBuckets[2],
+            gSemTimeoutBuckets[3], gSemTimeoutBuckets[4], gSemTimeoutBuckets[5]);
+}
+
+extern "C" int NvOsSemaphoreWaitTimeout(NvSemaphore h, unsigned us) {
+    if (gSemWaitTimeout == nullptr)
+        gSemWaitTimeout = (SemWaitTimeoutFn) semSym("NvOsSemaphoreWaitTimeout");
+    if (gSemWaitTimeout == nullptr)
+        return -1;
+    gSemWaits++;
+    semBucket(us);
+    int r = gSemWaitTimeout(h, us);
+    if (r != 0)
+        gSemWaitFails++;
+    if (gSemLogged < 30u) {
+        gSemLogged++;
+        __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                "semaforo espera#%u h=%p plazo=%u us -> r=%d%s",
+                gSemLogged, h, us, r, r == 0 ? " (exito)" : " (FALLA)");
+    } else if ((gSemWaits % 1000u) == 1u) {
+        dumpSemaphores("parcial");
+    }
+    return r;
+}
+
+extern "C" int NvOsSemaphoreWait(NvSemaphore h) {
+    if (gSemWait == nullptr)
+        gSemWait = (SemWaitFn) semSym("NvOsSemaphoreWait");
+    if (gSemWait == nullptr)
+        return -1;
+    gSemWaits++;
+    semBucket(0xffffffffu);              /* espera sin plazo: cap 'sin limite' */
+    int r = gSemWait(h);
+    if (r != 0)
+        gSemWaitFails++;
+    if (gSemLogged < 30u) {
+        gSemLogged++;
+        __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                "semaforo espera#%u h=%p sin plazo -> r=%d%s",
+                gSemLogged, h, r, r == 0 ? " (exito)" : " (FALLA)");
+    }
+    return r;
+}
+
+extern "C" void NvOsSemaphoreSignal(NvSemaphore h) {
+    if (gSemSignal == nullptr)
+        gSemSignal = (SemSignalFn) semSym("NvOsSemaphoreSignal");
+    if (gSemSignal == nullptr)
+        return;
+    gSemSignals++;
+    gSemSignal(h);
+}
+
+extern "C" int NvOsSemaphoreCreate(NvSemaphore* ph) {
+    if (gSemCreate == nullptr)
+        gSemCreate = (SemCreateFn) semSym("NvOsSemaphoreCreate");
+    if (gSemCreate == nullptr)
+        return -1;
+    gSemCreated++;
+    return gSemCreate(ph);
+}
+
+extern "C" void NvOsSemaphoreDestroy(NvSemaphore h) {
+    if (gSemDestroy == nullptr)
+        gSemDestroy = (SemDestroyFn) semSym("NvOsSemaphoreDestroy");
+    if (gSemDestroy == nullptr)
+        return;
+    gSemDestroy(h);
+}
+#endif  /* MOCHA_SEM_TRACE */
+
+static bool isCtrlNode(int fd) {
+    if (fd < 3 || fd >= kCacheSize)
+        return false;
+    return strcmp(gFdName[fd], "/dev/nvhost-ctrl") == 0;
+}
+
+static WaitStat* waitStat(int nr, uint32_t key, int fd) {
+    int i;
+    for (i = 0; i < gWaitStatCount; i++)
+        if (gWaitStats[i].nr == nr && gWaitStats[i].key == key)
+            return &gWaitStats[i];
+    if (gWaitStatCount >= kWaitSlots)
+        return nullptr;
+    WaitStat* w = &gWaitStats[gWaitStatCount++];
+    w->nr = nr;
+    w->key = key;
+    w->lo = 0xffffffffu;
+    w->hi = 0;
+    w->n = 0;
+    w->fails = 0;
+    w->fences = 0;
+    w->lastErr = 0;
+    w->fd = fd;
+    return w;
+}
+
+static void waitRange(WaitStat* w, uint32_t v) {
+    if (w == nullptr)
+        return;
+    if (v < w->lo)
+        w->lo = v;
+    if (v > w->hi)
+        w->hi = v;
+    w->n++;
+}
+
+static void dumpWaitStats(const char* why) {
+    int i;
+    __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+            "esperas de syncpoint (%s), %u entradas, %u ioctl de syncpoint vistos:",
+            why, (unsigned) gWaitStatCount, gWaitTotal);
+    for (i = 0; i < gWaitStatCount; i++) {
+        const WaitStat* w = &gWaitStats[i];
+        __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                "   nr=%-2u key=%-10u n=%-7u fallas=%-6u rango=%u..%u fences=%u err=%d fd=%d%s",
+                (unsigned) w->nr, w->key, w->n, w->fails,
+                w->lo == 0xffffffffu ? 0u : w->lo, w->hi, w->fences, w->lastErr, w->fd,
+                (w->fd >= 3 && w->fd < kCacheSize) ? gFdName[w->fd] : "");
+    }
+}
+
+/* Decodifica las llamadas de syncpoint.  'argp' es memoria del propio proceso
+ * (el kernel acaba de tocarla), y solo se sigue cuando el ioctl tuvo exito y el
+ * numero de elementos esta acotado: asi no leemos fuera del buffer del blob. */
+static void traceSyncptCmd(int fd, unsigned request, void* argp, int ret) {
+    unsigned nr = request & 0xffu;
+    unsigned size = (request >> kIocSizeShift) & 0x3fffu;
+    bool ctrl = isCtrlNode(fd);
+    int err = ret == 0 ? 0 : errno;
+
+    if (ctrl) {
+        if (nr == 1 || nr == 8) {            /* SYNCPT_READ / SYNCPT_READ_MAX */
+            if (size < sizeof(CtrlRead))
+                return;
+            CtrlRead* a = (CtrlRead*) argp;
+            WaitStat* w = waitStat((int) nr, a->id, fd);
+            waitRange(w, ret == 0 ? a->value : 0u);
+            if (w != nullptr)
+                w->lastErr = err;
+            gWaitTotal++;
+            if (gWaitLogged < 8u) {
+                gWaitLogged++;
+                __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                        "read#%u %s syncpt=%u valor=%u -> %s",
+                        gWaitLogged, nr == 1 ? "CTRL_SYNCPT_READ" : "CTRL_SYNCPT_READ_MAX",
+                        a->id, a->value, ret == 0 ? "ok" : "FALLO");
+            }
+            return;
+        }
+        if (nr == 3 || nr == 6 || nr == 9) {  /* WAIT / WAITEX / WAITMEX */
+            uint32_t id, thresh;
+            int32_t timeout;
+            if (nr == 3 && size >= sizeof(CtrlWait)) {
+                CtrlWait* a = (CtrlWait*) argp;
+                id = a->id; thresh = a->thresh; timeout = a->timeout;
+            } else if (nr == 6 && size >= sizeof(CtrlWaitex)) {
+                CtrlWaitex* a = (CtrlWaitex*) argp;
+                id = a->id; thresh = a->thresh; timeout = a->timeout;
+            } else if (nr == 9 && size >= sizeof(CtrlWaitmex)) {
+                CtrlWaitmex* a = (CtrlWaitmex*) argp;
+                id = a->id; thresh = a->thresh; timeout = a->timeout;
+            } else {
+                __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                        "espera nr=%u tam=%u: estructura mas pequena que la nuestra "
+                        "(%u/%u/%u), no se decodifica", nr, size,
+                        (unsigned) sizeof(CtrlWait), (unsigned) sizeof(CtrlWaitex),
+                        (unsigned) sizeof(CtrlWaitmex));
+                return;
+            }
+            WaitStat* w = waitStat((int) nr, id, fd);
+            if (w != nullptr) {
+                w->n++;
+                if (ret != 0)
+                    w->fails++;
+                w->lastErr = err;
+                if (thresh < w->lo)
+                    w->lo = thresh;
+                if (thresh > w->hi)
+                    w->hi = thresh;
+            }
+            gWaitTotal++;
+            if (gWaitLogged < 40u) {
+                gWaitLogged++;
+                __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                        "espera#%u nr=%u syncpt=%u umbral=%u timeout=%d ms -> %s (%s)",
+                        gWaitLogged, nr, id, thresh, timeout,
+                        ret == 0 ? "ok" : "FALLO", ret == 0 ? "" : strerror(err));
+            } else if ((gWaitTotal % 2000u) == 1u) {
+                dumpWaitStats("parcial");
+            }
+            return;
+        }
+        if (nr == 10 || nr == 11) {          /* CTRL_SYNC_FENCE_CREATE */
+            if (nr != 10 || size < sizeof(CtrlFence32))
+                return;                      /* la variante de 64 no se ha medido */
+            CtrlFence32* a = (CtrlFence32*) argp;
+            uint32_t npts = a->num_pts;
+            char pts[96];
+            int len = 0;
+            unsigned i;
+
+            pts[0] = '\0';
+            if (ret == 0 && a->pts != 0 && npts <= 8u) {
+                const SyncptInfo* info = (const SyncptInfo*) (uintptr_t) a->pts;
+                for (i = 0; i < npts; i++) {
+                    int room = (int) sizeof(pts) - len - 1;
+                    int w2;
+                    if (room < 16)
+                        break;
+                    w2 = snprintf(pts + len, (size_t) room + 1, " %u<=%u",
+                            info[i].id, info[i].thresh);
+                    if (w2 < 0)
+                        break;
+                    len += (w2 < room) ? w2 : room;
+                    if (w2 >= room)
+                        break;
+                    WaitStat* w = waitStat(10, info[i].id, fd);
+                    if (w != nullptr)
+                        w->fences++;
+                }
+            } else if (npts > 8u) {
+                snprintf(pts, sizeof(pts), " ?%u pts", npts);
+            }
+            WaitStat* w = waitStat(10, kNoKey, fd);
+            if (w != nullptr) {
+                w->n++;
+                if (ret != 0)
+                    w->fails++;
+                w->lastErr = err;
+            }
+            gWaitTotal++;
+            if (gFenceCreateLogged < 24u) {
+                gFenceCreateLogged++;
+                __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                        "ctrl_fence_create#%u num_pts=%u [%s] -> %s fd=%d",
+                        gFenceCreateLogged, npts, pts,
+                        ret == 0 ? "ok" : "FALLO", ret == 0 ? a->fence_fd : -err);
+            }
+            return;
+        }
+        return;
+    }
+
+    /* canal: GET_SYNCPOINTS(2) / GET_WAITBASES(3) cuentan; GET_SYNCPOINT(16) y
+     * GET_WAITBASE(17) devuelven el syncpt o el waitbase que el blob va a usar
+     * para sus esperas, que es lo que queremos comparar con los submits. */
+    if (nr == 2 || nr == 3 || nr == 16 || nr == 17) {
+        if (size < sizeof(ChanParam)) {
+            if (nr == 2 || nr == 3)
+                return;                      /* _IOR(struct nvhost_get_param_args) */
+            __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                    "canal nr=%u tam=%u < %u: ABI antigua, no se decodifica",
+                    nr, size, (unsigned) sizeof(ChanParam));
+            return;
+        }
+        ChanParam* a = (ChanParam*) argp;
+        WaitStat* w = waitStat((int) nr, a->param, fd);
+        if (w != nullptr) {
+            w->n++;
+            if (ret != 0)
+                w->fails++;
+            w->lastErr = err;
+            if (ret == 0) {
+                if (a->value < w->lo)
+                    w->lo = a->value;
+                if (a->value > w->hi)
+                    w->hi = a->value;
+            }
+        }
+        if (gWaitLogged < 24u && (nr == 16 || nr == 17)) {
+            gWaitLogged++;
+            __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                    "canal %s fd=%d(%s) param=%u -> valor=%u %s (%s)",
+                    nr == 16 ? "GET_SYNCPOINT" : "GET_WAITBASE", fd,
+                    (fd >= 3 && fd < kCacheSize) ? gFdName[fd] : "?",
+                    a->param, a->value, ret == 0 ? "ok" : "FALLO",
+                    ret == 0 ? "" : strerror(err));
+        }
+        return;
+    }
+}
+
 /* bionic declares "int ioctl(int, unsigned, ...)" (bits/ioctl.h); on a 32 bit
  * build int/unsigned/unsigned long are all 32 bit registers, so the calling
  * convention of the blobs is unaffected. */
+/* ---- limitador del registro directo del blob ---------------------------------
+ * El blob de 2015 saca su depurado por dos vias distintas:
+ *   - stderr: el hook de CameraWrapper.cpp lo reenvia a logcat y ya lo limitaba
+ *   - __android_log_print(...): directo a logcat, sin limitar
+ *
+ * Medido (2026-11-02, sesion de 16 s con la camara funcionando): 35.775 lineas, casi todas
+ * con tag 'NvOsDebugPrintf' y de un unico hilo (tid 2393), todas con el mismo texto
+ * 'Waiting on the syncpt semaphore failed 0x2'. El logcat muestra el texto igual que el
+ * mensaje del blob, o sea que llega como un unico %s ya formateado: interponer
+ * __android_log_print con esa firma es seguro. Los casos con varargs autenticos se reenvian
+ * INTACTOS con __android_log_vprint usando el va_list original (nunca re-formateamos lo que
+ * reenviamos: solo usamos una copia del va_list para poder comparar el texto).
+ *
+ * Por que merece la pena: en una medicion anterior logd llego al 70 % de CPU con 642.427
+ * faltos menores e hizo pruning ('Skipping entries from slow reader'), perdiendose el mensaje
+ * distintivo que explica el fallo del syncpt. Historicamente el flood era ~15.000 lineas/s
+ * (842.513 lineas identicas en 55 s = 88 % del log) y costaba bateria real.
+ *
+ * Politica: de cada tag, la PRIMERA aparicion de cada texto distinto por segundo pasa; las
+ * repeticiones se resumen al cambiar de segundo, con aviso bajo nuestra propia tag para no
+ * romper la deduplicacion del tag original. La senal diagnostica se conserva.
+ */
+#define MOCHA_LOG_MAX_DISTINCT_PER_SEC 40
+
+struct LogTagState {
+    const char* tag;
+    unsigned long second;
+    unsigned distinct;
+    unsigned repeats;
+    char last[240];
+};
+
+static LogTagState gLogTags[8];
+static pthread_mutex_t gLogLock = PTHREAD_MUTEX_INITIALIZER;
+static unsigned gLogIn = 0, gLogOut = 0, gLogSuppressed = 0;
+static unsigned gLogDumped = 0;
+
+typedef int (*LogPrintFn)(int, const char*, const char*, ...);
+static LogPrintFn gRealLogPrint = nullptr;
+
+static void logTagFlush(LogTagState& st) {
+    if (st.repeats == 0)
+        return;
+    /* OJO: usamos __android_log_write, NO __android_log_print: esa funcion si la
+     * interponemos, y llamar a la nuestra mientras sujetamos gLogLock seria un deadlock
+     * (el mutex no es recursivo). __android_log_write no esta interpuesta. */
+    char msg[300];
+    snprintf(msg, sizeof msg, "[limite] tag %s: '%s' repetida %u veces mas en ese segundo",
+            st.tag != nullptr ? st.tag : "(null)", st.last, st.repeats);
+    __android_log_write(ANDROID_LOG_INFO, "mocha-hal30", msg);
+    st.repeats = 0;
+}
+
+static LogTagState* logTagSlot(const char* tag) {
+    for (int i = 0; i < 8; i++) {
+        if (gLogTags[i].tag == nullptr) {
+            gLogTags[i].tag = tag;
+            return &gLogTags[i];
+        }
+        if (tag != nullptr && gLogTags[i].tag != nullptr && strcmp(gLogTags[i].tag, tag) == 0)
+            return &gLogTags[i];
+    }
+    return nullptr;
+}
+
+extern "C" int __android_log_print(int prio, const char* tag, const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+
+    if (prio > ANDROID_LOG_DEBUG) {
+        /* INFO/WARN/ERROR no se tocan: aqui solo limitamos el depurado (VERBOSE y DEBUG),
+         * que es lo que inunda. Asi nuestros propios diagnosticos no pasan por el filtro. */
+        int r = __android_log_vprint(prio, tag, fmt, ap);
+        va_end(ap);
+        return r;
+    }
+
+    char txt[240];
+    txt[0] = 0;
+    va_list cp;
+    va_copy(cp, ap);
+    int n = vsnprintf(txt, sizeof txt, fmt, cp);
+    va_end(cp);
+
+    if (n < 0 || n >= (int) sizeof txt) {
+        /* Formato largo o raro: no lo reproducimos, reenviamos la llamada tal cual. */
+        int r = __android_log_vprint(prio, tag, fmt, ap);
+        va_end(ap);
+        return r;
+    }
+
+    int out = 0;
+    unsigned long now = (unsigned long) time(nullptr);
+    pthread_mutex_lock(&gLogLock);
+    gLogIn++;
+    LogTagState* st = logTagSlot(tag);
+    if (st == nullptr) {
+        pthread_mutex_unlock(&gLogLock);
+        int r = __android_log_vprint(prio, tag, fmt, ap);
+        va_end(ap);
+        return r;
+    }
+    if (now != st->second) {
+        logTagFlush(*st);
+        st->second = now;
+        st->distinct = 0;
+        st->last[0] = 0;
+    }
+    if (strcmp(txt, st->last) == 0) {
+        /* Mesma linea repetida: se descarta la llamada a logd (ahorro real de CPU). */
+        st->repeats++;
+        gLogSuppressed++;
+    } else if (st->distinct < MOCHA_LOG_MAX_DISTINCT_PER_SEC) {
+        snprintf(st->last, sizeof st->last, "%s", txt);
+        st->distinct++;
+        gLogOut++;
+        out = __android_log_vprint(prio, tag, fmt, ap);
+    } else {
+        st->repeats++;
+        gLogSuppressed++;
+    }
+    if ((gLogIn % 20000u) < 4u && gLogDumped < 8u) {
+        gLogDumped++;
+        char msg[160];
+        snprintf(msg, sizeof msg, "limitador de log: %u llamadas, %u reenviadas, %u descartadas",
+                gLogIn, gLogOut, gLogSuppressed);
+        __android_log_write(ANDROID_LOG_INFO, "mocha-hal30", msg);
+    }
+    pthread_mutex_unlock(&gLogLock);
+    va_end(ap);
+    return out;
+}
+
+/* ---- interposicion del registro del blob, en su punto de origen ----------------
+ * libnvmm_camera_v3.so y libnvmm_camera.so importan (los dejan sin definir) TANTO
+ * NvOsDebugPrintf como NvOsFprintf, y el mismo texto 'Waiting on the syncpt semaphore
+ * failed 0x%x' sale por dos vias distintas:
+ *   - NvOsDebugPrintf -> logcat con tag 'NvOsDebugPrintf'   (eso si lo cortaba el
+ *     limitador de __android_log_print: 40.000 llamadas, 39.864 descartadas)
+ *   - NvOsFprintf -> stderr, que CameraWrapper.cpp reenvia con tag 'CameraWrapper'
+ *     (esa via seguia inundando: medido 2.246 lineas/s en una sesion normal)
+ * Por eso el limitador de log a secas no basta: hay que deduplicar en el origen.
+ *
+ * AQUI el ahorro es mayor: si la linea sobra, el blob no formatea, no escribe en stderr, no
+ * pasa por la tuberia y no llama a logd. Las lineas que si pasan se reenvian con el fmt y
+ * el va_list ORIGINALES mediante __android_log_vprint (asi no hay que reenviar varargs a
+ * mano, que es la parte fragil: nunca consumimos el va_list original, solo una copia para
+ * poder comparar el texto).
+ */
+typedef int (*NvOsVprintFn)(int, const char*, const char*, va_list);
+
+typedef int (*NvOsDebugPrintFn)(const char*, ...);
+typedef int (*NvOsFprintfFn)(void*, const char*, ...);
+static NvOsDebugPrintFn gRealDebugPrintf = nullptr;
+static NvOsFprintfFn gRealFprintf = nullptr;
+static unsigned gNvosLogIn = 0, gNvosLogDrop = 0;
+
+/* Unica familia de textos que filtramos: el flood conocido del HAL de 2015.
+ * Todo lo demas se reenvia intacto a la funcion real (no nos metemos en salidas que
+ * podrian ser datos y no depuracion). */
+static const char* const kFloodPatterns[] = {
+    "Waiting on the syncpt semaphore failed",
+    "Failed to get FRD",
+    "Work function returned",
+};
+
+static bool isFloodText(const char* txt) {
+    for (size_t i = 0; i < sizeof kFloodPatterns / sizeof kFloodPatterns[0]; i++)
+        if (strncmp(txt, kFloodPatterns[i], strlen(kFloodPatterns[i])) == 0)
+            return true;
+    return false;
+}
+
+static void* nvosSym(const char* name) {
+    void* s = dlsym(RTLD_NEXT, name);
+    if (s != nullptr)
+        return s;
+    void* h = dlopen("libnvos.so", RTLD_NOLOAD | RTLD_NOW);
+    if (h != nullptr)
+        s = dlsym(h, name);
+    return s;
+}
+
+/* Misma politica que el limitador de log: primer texto distinto por tag y por segundo,
+ * repeticiones resumadas. 'key' separa las vias de emision para no mezclar deduplicados. */
+static bool logGate(const char* key, const char* txt) {
+    unsigned long now = (unsigned long) time(nullptr);
+    bool pass = false;
+    pthread_mutex_lock(&gLogLock);
+    LogTagState* st = logTagSlot(key);
+    if (st == nullptr) {
+        pthread_mutex_unlock(&gLogLock);
+        return true;
+    }
+    if (now != st->second) {
+        logTagFlush(*st);
+        st->second = now;
+        st->distinct = 0;
+        st->last[0] = 0;
+    }
+    if (strcmp(txt, st->last) == 0) {
+        st->repeats++;
+        gLogSuppressed++;
+    } else if (st->distinct < MOCHA_LOG_MAX_DISTINCT_PER_SEC) {
+        snprintf(st->last, sizeof st->last, "%s", txt);
+        st->distinct++;
+        gLogOut++;
+        pass = true;
+    } else {
+        st->repeats++;
+        gLogSuppressed++;
+    }
+    if (((gLogIn + gNvosLogIn) % 20000u) < 4u && gLogDumped < 16u) {
+        gLogDumped++;
+        char msg[160];
+        snprintf(msg, sizeof msg, "limitador de log: %u llamadas, %u reenviadas, %u descartadas",
+                gLogIn, gLogOut, gLogSuppressed);
+        __android_log_write(ANDROID_LOG_INFO, "mocha-hal30", msg);
+    }
+    pthread_mutex_unlock(&gLogLock);
+    return pass;
+}
+
+extern "C" int NvOsDebugPrintf(const char* fmt, ...) {
+    if (fmt == nullptr)
+        return 0;
+    gNvosLogIn++;
+    va_list ap;
+    va_start(ap, fmt);
+    char txt[240];
+    txt[0] = 0;
+    va_list cp;
+    va_copy(cp, ap);
+    int n = vsnprintf(txt, sizeof txt, fmt, cp);
+    va_end(cp);
+    if (n < 0) {
+        __android_log_vprint(ANDROID_LOG_DEBUG, "NvOsDebugPrintf", fmt, ap);
+        va_end(ap);
+        return 0;
+    }
+    if (n >= (int) sizeof txt || !isFloodText(txt)) {
+        /* No es el flood o no cabe entero: reenviamos intacto con fmt y va_list originales. */
+        __android_log_vprint(ANDROID_LOG_DEBUG, "NvOsDebugPrintf", fmt, ap);
+        va_end(ap);
+        return 0;
+    }
+    if (logGate("nvos:dbg", txt))
+        __android_log_vprint(ANDROID_LOG_DEBUG, "NvOsDebugPrintf", fmt, ap);
+    else
+        gNvosLogDrop++;
+    va_end(ap);
+    return 0;
+}
+
+extern "C" int NvOsFprintf(void* hFile, const char* fmt, ...) {
+    if (fmt == nullptr)
+        return 0;
+    if (gRealFprintf == nullptr)
+        gRealFprintf = (NvOsFprintfFn) nvosSym("NvOsFprintf");
+    gNvosLogIn++;
+    va_list ap;
+    va_start(ap, fmt);
+    char txt[240];
+    txt[0] = 0;
+    va_list cp;
+    va_copy(cp, ap);
+    int n = vsnprintf(txt, sizeof txt, fmt, cp);
+    va_end(cp);
+    if (gRealFprintf == nullptr || n < 0 || n >= (int) sizeof txt || !isFloodText(txt)) {
+        /* Texto que no es el flood: no lo tocamos. Lo reenviamos a la funcion REAL con el
+         * fmt y el va_list original, mediante un puntero a funcion real: no podemos pasar
+         * un va_list a una funcion varargs, asi que reemitimos el texto ya resuelto (es lo
+         * mismo para salida de texto) y, si la real no esta disponible, a logcat. */
+        if (gRealFprintf != nullptr)
+            gRealFprintf(hFile, "%s", txt);
+        else
+            __android_log_vprint(ANDROID_LOG_DEBUG, "NvOsFprintf", fmt, ap);
+        va_end(ap);
+        return 0;
+    }
+    if (logGate("nvos:printf", txt)) {
+        /* Reemitimos el texto ya resuelto: una sola llamada real, sin reenviar varargs. */
+        gRealFprintf(hFile, "%s", txt);
+    } else {
+        gNvosLogDrop++;
+    }
+    va_end(ap);
+    return 0;
+}
+
 extern "C" int ioctl(int fd, unsigned request, ...) {
     va_list args;
     va_start(args, request);
@@ -659,8 +1362,9 @@ extern "C" int ioctl(int fd, unsigned request, ...) {
          * y devolvemos 0 (= /dev/null, siempre senalado), que es lo que el blob ya
          * tolera sin bloquearse. */
         if (ret == 0 && translated.fence > 2u) {
+            /* ANTES se anadia dos veces: consumia dos huecos del sondeo por fence y
+             * inflaba los contadores ('5408 senalizados' sobre '4000 vistos'). */
             fenceProbeAdd((int)translated.fence);     /* copia nuestra para medir el fence */
-            fenceProbeAdd((int)translated.fence);     /* copia nuestra para medir */
             if (gReapFences) {
                 fenceReapAdd((int)translated.fence);
                 gFencesReaped++;
@@ -756,6 +1460,8 @@ extern "C" int ioctl(int fd, unsigned request, ...) {
                 gIoctlStats[slot].fails++;
         }
     }
+
+    traceSyncptCmd(fd, request, argp, ret);
 
     if (gIoctlLogged < 60u) {
         gIoctlLogged++;
