@@ -25,7 +25,8 @@ MOCHA_REGISTRY_INPUTS := $(shell find $(LOCAL_PATH)/patches \( -name '*.patch' -
 
 ifneq ($(strip $(OUT_DIR)),)
 $(MOCHA_REGISTRY_STAMP): $(MOCHA_REGISTRY_SCRIPT) $(MOCHA_REGISTRY_INPUTS)
-	@if [ "$$MOCHA_SKIP_REGISTRY_CHECK" = "1" ]; then \
+	@mkdir -p $(dir $@) 2>/dev/null || true; \
+	if [ "$$MOCHA_SKIP_REGISTRY_CHECK" = "1" ]; then \
 		echo "mocha: AVISO: comprobacion del registro OMITIDA (MOCHA_SKIP_REGISTRY_CHECK=1)" > $@; \
 	else \
 		echo "mocha: comprobando que device/xiaomi/mocha/patches reproduce el arbol..."; \
