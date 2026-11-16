@@ -7,7 +7,8 @@
 # y su NvOsFileSystem NO comprueba el NULL que devuelve NvOsFopen: si el directorio
 # falta o no se puede escribir, NvCameraIspDumpFactoryToFile llama a NvOsFwrite(NULL)
 # y el proveedor de camara muere con SIGSEGV (SEGV_MAPERR, fault addr 0x0) en bucle.
-# Ver device/xiaomi/mocha/docs/analisis_s_log_vs_abobo_20261029.md (causa raiz 2).
+# Ver el analisis en la raiz del workspace (fuera del arbol del device): analisis_s_log_vs_abobo_20261029.md
+# (causa raiz 2).  Las notas de trabajo y las mediciones ya NO se guardan dentro del device tree.
 #
 # Patron tomado de nuestros propios ficheros Tegra (sepolicy/common/vendor/file.te:113
 # 'type nvpmodel_data, file_type, data_file_type;' y :116 'nvphsd_data'), NINGUNO de
