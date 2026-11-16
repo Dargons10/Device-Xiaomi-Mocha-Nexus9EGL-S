@@ -1387,6 +1387,41 @@ struct NvmapMap32 { uint32_t handle, offset, length, flags, addr; };
  * memcpy nuestro habria matado el provider con SIGSEGV.  pread sobre /proc/self/mem
  * devuelve error en lugar de matar nada. */
 int gMemFd = -1;
+
+/* El snapshot previo de argumentos es OPT-IN (2026-11-16, K-46).  Motivo: el shim va
+ * LD_PRELOAD'ado en el camera provider (parche hardware/interfaces/0005), y abrir
+ * /proc/self/mem + pread dentro del camino de los ioctls nvmap metio una llamada que puede
+ * bloquear (access_remote_vm() coge mmap_sem del proceso) en los hilos rapidos del provider -
+ * los mismos que ya mostraban 'FastThread: did not receive expected priority boost on time'.
+ * El tablet llevo desde 14:14 sin dar ventanas estables de adb con ESTE shim en servicio.
+ * Sin evidencia de que sea la causa (K-46 sigue abierto), pero el default tiene que ser el
+ * comportamiento conocido-bueno: aqui = SIN snapshots.  Se enciende con
+ *   /data/local/tmp/mocha-argsnap  contenido '1'   o   MOCHA_ARGSNAP=1.
+ */
+bool argSnapOn()
+{
+    static int estado = -1;
+    if (estado < 0) {
+        const char* env = getenv("MOCHA_ARGSNAP");
+        if (env != nullptr && (env[0] == '1' || env[0] == 'y' || env[0] == 'Y'))
+            estado = 1;
+        else {
+            FILE* f = fopen("/data/local/tmp/mocha-argsnap", "r");
+            char buf[8];
+            estado = 0;
+            if (f != nullptr) {
+                if (fgets(buf, sizeof(buf), f) != nullptr && buf[0] == '1')
+                    estado = 1;
+                fclose(f);
+            }
+        }
+        __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                "snapshot de argumentos nvmap: %s (knob /data/local/tmp/mocha-argsnap o "
+                "MOCHA_ARGSNAP=1)", estado == 1 ? "ACTIVO" : "apagado (comportamiento conocido-bueno)");
+    }
+    return estado == 1;
+}
+
 bool memTry(const void* addr, void* dst, size_t n) {
     if (addr == nullptr || n == 0 || n > 64)
         return false;
@@ -1418,6 +1453,44 @@ unsigned gNvmapCnt[kNvmapSlots];
 unsigned gNvmapFail[kNvmapSlots];
 unsigned gNvmapTotal = 0, gNvmapOther = 0;
 unsigned gNvmapRwLogged = 0, gNvmapErrLogged = 0;
+
+/* K-47: traductor de la peticion nvmap degenerada de CERO atomos.  Medido dos veces con firma
+ * identica (2026-11-16 16:54 con pack al 79 % y 19:14 con pack al 33 %, kernel #22, shim trazador
+ * md5 f2a6de5d):  handle=1163(anon_inode:dmabuf) off=0 elem=0 hstride=0 ustride=0 count=1 addr=0x0
+ * -> nvmap_ioctl.c:545 devuelve -EINVAL -> 'doJpegEncoding -- (error 0x6)' -> 'threadLoop: jpeg
+ * encoding fail' -> no hay JPEG.  O sea NO depende de la bateria ni del estado del pack.
+ * Responder AQUI (en el shim) en vez de en el kernel es la misma accion con bastante menos riesgo:
+ * la peticion no transfiere datos por construccion, se deshace empujando otro .so (segundos, sin
+ * reflashear LNX y sin reiniciar: basta con que el provider vuelva a arrancar) y no puede estropear
+ * un arranque.  Knob /data/local/tmp/mocha-nvmap-noop: '0' = pasar al kernel tal cual (comportamiento
+ * de siempre); fichero ausente = no traducir.  ACTUALIZADO 2026-11-16 19:36, medido con el camino ya
+ * reparado (K-51: permisos de /dev/tegra_avpchannel): el codificador abre ('Encoder_Open ++' y ahora
+ * tambien su marca de salida '--'), 'nvmap WRITE_32: 272 llamadas, 0 fallas' y la peticion degenerada
+ * DEJ6 DE APARECER -> era residuo del cierre fallido del codificador, no la causa.  Por eso el
+ * traductor queda APAGADO por defecto y solo la cadena '1' del knob lo enciende: no queremos
+ * enmascarar un defecto real si vuelve a aparecer. */
+static int nvmapNoopOn(void)
+{
+    static int estado = -1;
+    if (estado < 0) {
+        FILE *f = fopen("/data/local/tmp/mocha-nvmap-noop", "r");
+        char c = 0;
+        if (f != nullptr) {
+            if (fread(&c, 1, 1, f) != 1)
+                c = '0';
+            fclose(f);
+            estado = (c == '1') ? 1 : 0;
+        } else {
+            const char *e = getenv("MOCHA_NVMAP_NOOP");
+            estado = (e != nullptr && e[0] == '1') ? 1 : 0;
+        }
+        __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                "traductor de WRITE/READ de 0 atomos: %s (knob /data/local/tmp/mocha-nvmap-noop: "
+                "escribe 1 para activarlo)", estado ? "ACTIVO" : "apagado (por defecto)");
+    }
+    return estado;
+}
+unsigned gNvmapNoopLogged = 0;
 
 int nvmapNrSlot(unsigned nr) {
     for (int i = 0; i < kNvmapSlots; i++)
@@ -1462,6 +1535,24 @@ static void traceNvmapCmd(int fd, unsigned request, const void* pre, unsigned pr
             gNvmapFail[slot]++;
     }
 
+    /* Decodificacion POST-llamada de la struct del blob: es segura porque seguimos DENTRO del
+     * ioctl(), o sea el marco de pila del llamador sigue vivo y su struct tambien.  Unica
+     * salvedad, documentada: en un rw CON EXITO el kernel escribe 'copied' encima de 'count'
+     * (nvmap_ioctl.c:602-612); en un rw FALLADO el kernel sale antes de ese __put_user, asi que
+     * lo que se lee son exactamente los argumentos que mando el blob.  Por eso el snapshot
+     * previo (argSnapOn) es un extra opcional, no un requisito: sin el, las trazas de
+     * CREATE/ALLOC/MMAP y del WRITE fallido funcionan igual (aprendido 2026-11-16 16:52, cuando
+     * atar todo al snapshot dej6 la medicion sin datos porque el provider no pudo leer
+     * /data/local/tmp ni /proc/self/mem). */
+    unsigned char local[40];
+    const void* src = pre;
+    unsigned srcSize = preSize;
+    if (src == nullptr && argp != nullptr && size <= sizeof(local)) {
+        memcpy(local, argp, size);
+        src = local;
+        srcSize = size;
+    }
+
     if (slot < 0 && gNvmapUnkN < 8) {
         int i;
         for (i = 0; i < gNvmapUnkN; i++)
@@ -1481,10 +1572,9 @@ static void traceNvmapCmd(int fd, unsigned request, const void* pre, unsigned pr
     /* CREATE / FROM_ID / GET_ID / SHARE / GET_FD / FROM_FD: el campo de entrada es
      * size (CREATE) o fd (FROM_FD) y el kernel devuelve el handle en el segundo campo. */
     if ((nr == 0 || nr == 2 || nr == 13 || nr == 14 || nr == 15 || nr == 16) &&
-        pre != nullptr && preSize >= sizeof(NvmapCreate) && argp != nullptr &&
-        size >= sizeof(NvmapCreate) && gNvmapCreateLogged < 16u) {
-        const NvmapCreate* a = (const NvmapCreate*)pre;
-        const NvmapCreate* o = (const NvmapCreate*)argp;
+        src != nullptr && srcSize >= sizeof(NvmapCreate) && gNvmapCreateLogged < 16u) {
+        const NvmapCreate* a = (const NvmapCreate*)src;
+        const NvmapCreate* o = (const NvmapCreate*)src;
         gNvmapCreateLogged++;
         __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
                 "nvmap %s fd=%d pide=%u(0x%x) handle=%u tam_hm=%u -> %s%s",
@@ -1495,13 +1585,12 @@ static void traceNvmapCmd(int fd, unsigned request, const void* pre, unsigned pr
 
     /* ALLOC / ALLOC_KIND: size NO esta aqui (se dio en CREATE); lo que hay que leer es
      * desde que heap y con que alineamiento se reparte. */
-    if ((nr == 3 || nr == 100) && pre != nullptr &&
-        preSize >= (nr == 3 ? sizeof(NvmapAlloc) : sizeof(NvmapAllocKind)) &&
+    if ((nr == 3 || nr == 100) && src != nullptr && srcSize >= (nr == 3 ? sizeof(NvmapAlloc) : sizeof(NvmapAllocKind)) &&
         gNvmapAllocLogged < 16u) {
-        const NvmapAlloc* a = (const NvmapAlloc*)pre;
+        const NvmapAlloc* a = (const NvmapAlloc*)src;
         unsigned kindb = 0;
         if (nr == 100)
-            kindb = ((const NvmapAllocKind*)pre)->kind;
+            kindb = ((const NvmapAllocKind*)src)->kind;
         gNvmapAllocLogged++;
         __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
                 "nvmap %s fd=%d handle=%u heap=%s(0x%x) flags=0x%x align=%u%s -> %s%s",
@@ -1513,9 +1602,9 @@ static void traceNvmapCmd(int fd, unsigned request, const void* pre, unsigned pr
 
     /* MMAP_32: que trozo del buffer se mapea (offset+length) -> dice donde cree el blob
      * que estan sus planos/dentro del handle. */
-    if (nr == 5 && pre != nullptr && preSize >= sizeof(NvmapMap32) &&
+    if (nr == 5 && src != nullptr && srcSize >= sizeof(NvmapMap32) &&
         gNvmapMapLogged < 16u) {
-        const NvmapMap32* a = (const NvmapMap32*)pre;
+        const NvmapMap32* a = (const NvmapMap32*)src;
         gNvmapMapLogged++;
         __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
                 "nvmap MMAP_32 fd=%d handle=%u off=%u len=%u flags=0x%x addr=0x%x -> %s%s",
@@ -1526,20 +1615,17 @@ static void traceNvmapCmd(int fd, unsigned request, const void* pre, unsigned pr
 
     if (nr == 6 || nr == 7) {
         const NvmapRw* a = nullptr;
-        const char* modo = "args previos";
-        unsigned char snap[32];
-        if (pre != nullptr && preSize >= sizeof(NvmapRw)) {
-            a = (const NvmapRw*)pre;
-        } else if (argp != nullptr && size >= sizeof(NvmapRw) &&
-                   memTry(argp, snap, sizeof(snap))) {
-            a = (const NvmapRw*)snap;
-            modo = "args POST-llamada (count puede estar sobreescrito por el kernel)";
+        const char* modo = "args post-llamada (en un rw FALLADO el kernel no llega a escribir count, asi que esto ES el argumento del blob; en uno exitoso count = bytes copiados)";
+        if (src != nullptr && srcSize >= sizeof(NvmapRw)) {
+            a = (const NvmapRw*)src;
+            if (pre != nullptr)
+                modo = "args previos a la llamada";
         }
         if (a == nullptr) {
             if (gNvmapErrLogged < 24u && ret != 0) {
                 gNvmapErrLogged++;
                 __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
-                        "nvmap %s FALLO (%s) sin copia de argumentos: tam=%u fd=%d",
+                        "nvmap %s FALLO (%s) sin copia de argumentos (tam=%u no cabe en 40): fd=%d",
                         nr == 6 ? "WRITE" : "READ", strerror(errno), size, fd);
             }
             return;
@@ -1576,8 +1662,8 @@ static void traceNvmapCmd(int fd, unsigned request, const void* pre, unsigned pr
         return;
     }
 
-    if (nr == 12 && pre != nullptr && preSize >= sizeof(NvmapCache)) {
-        const NvmapCache* a = (const NvmapCache*)pre;
+    if (nr == 12 && src != nullptr && srcSize >= sizeof(NvmapCache)) {
+        const NvmapCache* a = (const NvmapCache*)src;
         if (ret != 0 && gNvmapErrLogged < 24u) {
             gNvmapErrLogged++;
             __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
@@ -1733,11 +1819,12 @@ extern "C" int ioctl(int fd, unsigned request, ...) {
     if (!esNvhost && !esNvmap)
         return gRealIoctl(fd, request, argp);
 
-    /* Copia de los argumentos nvmap ANTES de que el kernel los toque (ver traceNvmapCmd). */
+    /* Copia de los argumentos nvmap ANTES de que el kernel los toque (ver traceNvmapCmd).  Solo
+     * si el knob esta activo: por defecto no se toca /proc/self/mem (ver argSnapOn). */
     unsigned char snap[40];
     const void* pre = nullptr;
     unsigned preSize = 0;
-    if (esNvmap && argp != nullptr) {
+    if (esNvmap && argp != nullptr && argSnapOn()) {
         unsigned nr = request & 0xffu;
         unsigned size = (request >> kIocSizeShift) & 0x3fffu;
         if ((nr == 6 || nr == 7 || nr == 5 || nr == 12 || nr == 3 || nr == 100 ||
@@ -1745,6 +1832,31 @@ extern "C" int ioctl(int fd, unsigned request, ...) {
             size <= sizeof(snap) && memTry(argp, snap, size)) {
             pre = snap;
             preSize = size;
+        }
+    }
+
+    /* K-47: ver nvmapNoopOn() mas arriba.  Se hace ANTES de llamar al kernel: si la peticion es
+     * de cero atomos, el shim responde exito y escribe count=0 en la struct del blob, que es
+     * exactamente lo que el blob lee despues de un WRITE/READ con exito (nvmap_ioctl.c:602-612). */
+    if (esNvmap && argp != nullptr) {
+        unsigned nr0 = request & 0xffu;
+        unsigned sz0 = (request >> kIocSizeShift) & 0x3fffu;
+        if ((nr0 == 6 || nr0 == 7) && sz0 >= sizeof(NvmapRw)) {
+            NvmapRw op;
+            memcpy(&op, argp, sizeof(op));
+            if (op.addr == 0 && op.elem_size == 0 && op.hmem_stride == 0 &&
+                op.user_stride == 0 && op.count == 1 && nvmapNoopOn()) {
+                if (gNvmapNoopLogged < 8u) {
+                    gNvmapNoopLogged++;
+                    __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                            "nvmap %s de 0 atomos (fd=%d handle=%u offs=%u) -> el shim responde "
+                            "exito sin copiar; antes esto era -EINVAL y mataba el JPEG (K-47)",
+                            nr0 == 6 ? "WRITE" : "READ", fd, op.handle, op.offset);
+                }
+                op.count = 0;
+                memcpy(argp, &op, sizeof(op));
+                return 0;
+            }
         }
     }
 
