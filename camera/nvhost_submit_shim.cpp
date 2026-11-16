@@ -27,6 +27,11 @@
  * con nuestra definicion de ioctl. */
 extern "C" ssize_t readlink(const char* __path, char* __buf, size_t __bufsize);
 extern "C" int close(int __fd);
+/* pread/open para la copia previa de argumentos (ver traceNvmapCmd).  Declarados a mano
+ * por el mismo motivo que readlink/close: no queremos arrastrar <unistd.h>. */
+extern "C" ssize_t pread(int __fd, void* __buf, size_t __count, off_t __offset);
+extern "C" int open(const char* __path, int __flags, ...);
+#include <fcntl.h>
 #include <stdio.h>
 #include <errno.h>
 #include <stdarg.h>
@@ -1369,6 +1374,45 @@ const NvmapNr kNvmapNrs[] = {
     {14, "SHARE"},       {15, "GET_FD"},      {16, "FROM_FD"},
     {17, "CACHE_LIST"},  {18, "RESERVE"},     {100, "ALLOC_KIND"},
 };
+/* El resto de structs nvmap que el blob usa y que hay que saber lo que piden:
+ * include/linux/nvmap.h:157 (create_handle), :161 (alloc_handle), :171
+ * (alloc_kind_handle), :185 (map_caller_32). */
+struct NvmapCreate { uint32_t pide; uint32_t devuelve; };   /* union{size|fd|id} + handle(out) */
+struct NvmapAlloc { uint32_t handle, heap_mask, flags, align; };
+struct NvmapAllocKind { uint32_t handle, heap_mask, flags, align; uint8_t kind, comp_tags; };
+struct NvmapMap32 { uint32_t handle, offset, length, flags, addr; };
+
+/* Copia de la memoria del PROPIO proceso via /proc/self/mem.  Por que no memcpy: si el
+ * blob pasara un puntero no mapeado, el kernel solo habria devuelto -EFAULT, pero un
+ * memcpy nuestro habria matado el provider con SIGSEGV.  pread sobre /proc/self/mem
+ * devuelve error en lugar de matar nada. */
+int gMemFd = -1;
+bool memTry(const void* addr, void* dst, size_t n) {
+    if (addr == nullptr || n == 0 || n > 64)
+        return false;
+    if (gMemFd < 0) {
+        gMemFd = open("/proc/self/mem", O_RDONLY | O_CLOEXEC);
+        if (gMemFd < 0)
+            return false;
+    }
+    return pread(gMemFd, dst, n, (off_t)(uintptr_t)addr) == (ssize_t)n;
+}
+
+const char* heapName(uint32_t m) {
+    if (m & (1u << 30)) return "IOVMM(sysmem)";
+    if (m & (1u << 28)) return "CARVEOUT_VPR";
+    if (m & (1u << 29)) return "CARVEOUT_IRAM";
+    if (m & (1u << 27)) return "CARVEOUT_TSEC";
+    if (m & 1u) return "CARVEOUT_GENERIC";
+    return "?";
+}
+
+/* nvmap ioctls que llegan por un fd de /dev/nvmap pero no estan en kNvmapNrs: imprimir
+ * los primeros distintos, que 'sin clasificar' no puede ser la respuesta. */
+unsigned gNvmapUnk[8][2];
+int gNvmapUnkN = 0;
+unsigned gNvmapCreateLogged = 0, gNvmapAllocLogged = 0, gNvmapMapLogged = 0;
+
 constexpr int kNvmapSlots = (int)(sizeof kNvmapNrs / sizeof kNvmapNrs[0]);
 unsigned gNvmapCnt[kNvmapSlots];
 unsigned gNvmapFail[kNvmapSlots];
@@ -1396,7 +1440,18 @@ bool fdNameOf(int fd, char* out, size_t n) {
 
 }  // namespace
 
-static void traceNvmapCmd(int fd, unsigned request, void* argp, int ret) {
+/* Decodifica una llamada nvmap.  'pre' es la copia de los argumentos ANTES de la llamada
+ * real (o nullptr si no se pudo copiar); 'argp' es la struct del blob DESPUES de la llamada.
+ * Por que hace falta 'pre' (aprendido el 2026-11-16, camera.log 28621-28626):
+ * nvmap_ioctl_rw_handle() termina con `__put_user(copied, &uarg->count)`
+ * (drivers/video/tegra/nvmap/nvmap_ioctl.c:612), o sea que el kernel ESCRIBE el numero de
+ * bytes copiados encima del `count` del blob.  Decodificar despues de un fallo muestra
+ * count=0 y hace creer que el blob mando count=0: el trazador etiqueto
+ * 'addr/count/elem_size en 0' una llamada que el kernel habia rechazado por
+ * 'h_offs >= h->size' con count=1.  Los argumentos reales solo se ven antes de llamar.
+ */
+static void traceNvmapCmd(int fd, unsigned request, const void* pre, unsigned preSize,
+                          void* argp, int ret) {
     unsigned nr = request & 0xffu;
     unsigned size = (request >> kIocSizeShift) & 0x3fffu;
     int slot = nvmapNrSlot(nr);
@@ -1407,48 +1462,132 @@ static void traceNvmapCmd(int fd, unsigned request, void* argp, int ret) {
             gNvmapFail[slot]++;
     }
 
-    if ((nr == 6 || nr == 7) && argp != nullptr && size >= sizeof(NvmapRw)) {
-        const NvmapRw* a = (const NvmapRw*)argp;
+    if (slot < 0 && gNvmapUnkN < 8) {
+        int i;
+        for (i = 0; i < gNvmapUnkN; i++)
+            if (gNvmapUnk[i][0] == nr && gNvmapUnk[i][1] == size)
+                break;
+        if (i == gNvmapUnkN) {
+            gNvmapUnk[gNvmapUnkN][0] = nr;
+            gNvmapUnk[gNvmapUnkN][1] = size;
+            gNvmapUnkN++;
+            __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                    "nvmap SIN CLASIFICAR nr=%u dir=%u tam=%u fd=%d -> %s",
+                    nr, (request >> kIocDirShift) & 0x3u, size, fd,
+                    ret == 0 ? "ok" : strerror(errno));
+        }
+    }
+
+    /* CREATE / FROM_ID / GET_ID / SHARE / GET_FD / FROM_FD: el campo de entrada es
+     * size (CREATE) o fd (FROM_FD) y el kernel devuelve el handle en el segundo campo. */
+    if ((nr == 0 || nr == 2 || nr == 13 || nr == 14 || nr == 15 || nr == 16) &&
+        pre != nullptr && preSize >= sizeof(NvmapCreate) && argp != nullptr &&
+        size >= sizeof(NvmapCreate) && gNvmapCreateLogged < 16u) {
+        const NvmapCreate* a = (const NvmapCreate*)pre;
+        const NvmapCreate* o = (const NvmapCreate*)argp;
+        gNvmapCreateLogged++;
+        __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                "nvmap %s fd=%d pide=%u(0x%x) handle=%u tam_hm=%u -> %s%s",
+                kNvmapNrs[slot].name, fd, a->pide, a->pide, o->devuelve, size,
+                ret == 0 ? "ok" : "FALLO", ret == 0 ? "" : strerror(errno));
+        return;
+    }
+
+    /* ALLOC / ALLOC_KIND: size NO esta aqui (se dio en CREATE); lo que hay que leer es
+     * desde que heap y con que alineamiento se reparte. */
+    if ((nr == 3 || nr == 100) && pre != nullptr &&
+        preSize >= (nr == 3 ? sizeof(NvmapAlloc) : sizeof(NvmapAllocKind)) &&
+        gNvmapAllocLogged < 16u) {
+        const NvmapAlloc* a = (const NvmapAlloc*)pre;
+        unsigned kindb = 0;
+        if (nr == 100)
+            kindb = ((const NvmapAllocKind*)pre)->kind;
+        gNvmapAllocLogged++;
+        __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                "nvmap %s fd=%d handle=%u heap=%s(0x%x) flags=0x%x align=%u%s -> %s%s",
+                kNvmapNrs[slot].name, fd, a->handle, heapName(a->heap_mask), a->heap_mask,
+                a->flags, a->align, (nr == 100) ? (kindb ? " kind" : " kind0") : "",
+                ret == 0 ? "ok" : "FALLO", ret == 0 ? "" : strerror(errno));
+        return;
+    }
+
+    /* MMAP_32: que trozo del buffer se mapea (offset+length) -> dice donde cree el blob
+     * que estan sus planos/dentro del handle. */
+    if (nr == 5 && pre != nullptr && preSize >= sizeof(NvmapMap32) &&
+        gNvmapMapLogged < 16u) {
+        const NvmapMap32* a = (const NvmapMap32*)pre;
+        gNvmapMapLogged++;
+        __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                "nvmap MMAP_32 fd=%d handle=%u off=%u len=%u flags=0x%x addr=0x%x -> %s%s",
+                fd, a->handle, a->offset, a->length, a->flags, a->addr,
+                ret == 0 ? "ok" : "FALLO", ret == 0 ? "" : strerror(errno));
+        return;
+    }
+
+    if (nr == 6 || nr == 7) {
+        const NvmapRw* a = nullptr;
+        const char* modo = "args previos";
+        unsigned char snap[32];
+        if (pre != nullptr && preSize >= sizeof(NvmapRw)) {
+            a = (const NvmapRw*)pre;
+        } else if (argp != nullptr && size >= sizeof(NvmapRw) &&
+                   memTry(argp, snap, sizeof(snap))) {
+            a = (const NvmapRw*)snap;
+            modo = "args POST-llamada (count puede estar sobreescrito por el kernel)";
+        }
+        if (a == nullptr) {
+            if (gNvmapErrLogged < 24u && ret != 0) {
+                gNvmapErrLogged++;
+                __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                        "nvmap %s FALLO (%s) sin copia de argumentos: tam=%u fd=%d",
+                        nr == 6 ? "WRITE" : "READ", strerror(errno), size, fd);
+            }
+            return;
+        }
         char hn[48];
         bool esfd = fdNameOf((int)a->handle, hn, sizeof hn);
-        if (gNvmapRwLogged < 24u) {
+        if (ret != 0) {
+            if (gNvmapErrLogged < 24u) {
+                gNvmapErrLogged++;
+                const char* why;
+                if (!a->addr || !a->count || !a->elem_size)
+                    why = "addr/count/elem_size en 0 -> nvmap_ioctl.c:545";
+                else if (!esfd)
+                    why = "el handle no es un fd propio -> unmarshal_user_handle()=0 -> nvmap_ioctl.c:549";
+                else
+                    why = "geometria (una de las 6 clausulas de rw_handle; el kernel dice cual y el tamano real del handle con 'mocha rw EINVAL')";
+                __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                        "nvmap %s FALLO (%s) por %s [%s] fd=%d handle=%u(%s) off=%u elem=%u "
+                        "hstride=%u ustride=%u count=%u addr=0x%x",
+                        nr == 6 ? "WRITE" : "READ", strerror(errno), why, modo, fd,
+                        a->handle, esfd ? hn : "NO-ES-FD-DE-ESTE-PROCESO",
+                        a->offset, a->elem_size, a->hmem_stride, a->user_stride,
+                        a->count, a->addr);
+            }
+        } else if (gNvmapRwLogged < 6u) {
             gNvmapRwLogged++;
             __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
-                    "nvmap %s fd=%d handle=%u(%s) off=%u elem=%u hstride=%u ustride=%u "
-                    "count=%u addr=0x%x -> %s (%s)",
-                    nr == 6 ? "WRITE_32" : "READ_32", fd, a->handle,
-                    esfd ? hn : "NO-ES-UN-FD-DE-ESTE-PROCESO",
-                    a->offset, a->elem_size, a->hmem_stride, a->user_stride, a->count,
-                    a->addr, ret == 0 ? "ok" : "FALLO",
-                    ret == 0 ? "" : strerror(errno));
-        }
-        if (ret != 0 && gNvmapErrLogged < 12u) {
-            gNvmapErrLogged++;
-            const char* why;
-            if (!a->addr || !a->count || !a->elem_size)
-                why = "addr/count/elem_size en 0 -> nvmap_ioctl.c:545";
-            else if (!esfd)
-                why = "el handle no es un fd propio -> unmarshal_user_handle()=0 -> nvmap_ioctl.c:549";
-            else
-                why = "geometria: leer h->size exige el pr_warn 'mocha nvmap rw' del kernel (rw_handle, nvmap_ioctl.c:1024-1042)";
-            __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
-                    "nvmap %s FALLO, causa sospechosa: %s", nr == 6 ? "WRITE_32" : "READ_32", why);
+                    "nvmap %s ok fd=%d handle=%u(%s) off=%u elem=%u hstride=%u ustride=%u "
+                    "count=%u addr=0x%x",
+                    nr == 6 ? "WRITE" : "READ", fd, a->handle,
+                    esfd ? hn : "NO-ES-FD-DE-ESTE-PROCESO", a->offset, a->elem_size,
+                    a->hmem_stride, a->user_stride, a->count, a->addr);
         }
         return;
     }
 
-    if (nr == 12 && argp != nullptr && size >= sizeof(NvmapCache)) {
-        const NvmapCache* a = (const NvmapCache*)argp;
-        if (ret != 0 && gNvmapErrLogged < 12u) {
+    if (nr == 12 && pre != nullptr && preSize >= sizeof(NvmapCache)) {
+        const NvmapCache* a = (const NvmapCache*)pre;
+        if (ret != 0 && gNvmapErrLogged < 24u) {
             gNvmapErrLogged++;
             __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
-                    "nvmap CACHE_32 FALLO handle=%u len=%u op=%d (%s)",
-                    a->handle, a->len, a->op, strerror(errno));
+                    "nvmap CACHE_32 FALLO (%s) handle=%u addr=0x%x len=%u op=%d",
+                    strerror(errno), a->handle, a->addr, a->len, a->op);
         }
         return;
     }
 
-    if (ret != 0 && gNvmapErrLogged < 12u) {
+    if (ret != 0 && gNvmapErrLogged < 24u) {
         gNvmapErrLogged++;
         __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
                 "nvmap nr=%u tam=%u fd=%d FALLO (%s)", nr, size, fd, strerror(errno));
@@ -1587,16 +1726,32 @@ extern "C" int ioctl(int fd, unsigned request, ...) {
         return ret;
     }
 
-    int ret = gRealIoctl(fd, request, argp);
     int kind = fdKind(fd);
     unsigned magic = (request >> kIocTypeShift) & 0xffu;
     bool esNvhost = (kind == 1) || (magic == kNvhostMagic);
     bool esNvmap = (kind == 3) || (magic == kNvmapMagic);
     if (!esNvhost && !esNvmap)
-        return ret;
+        return gRealIoctl(fd, request, argp);
+
+    /* Copia de los argumentos nvmap ANTES de que el kernel los toque (ver traceNvmapCmd). */
+    unsigned char snap[40];
+    const void* pre = nullptr;
+    unsigned preSize = 0;
+    if (esNvmap && argp != nullptr) {
+        unsigned nr = request & 0xffu;
+        unsigned size = (request >> kIocSizeShift) & 0x3fffu;
+        if ((nr == 6 || nr == 7 || nr == 5 || nr == 12 || nr == 3 || nr == 100 ||
+             nr == 0 || nr == 2 || nr == 13 || nr == 14 || nr == 15 || nr == 16) &&
+            size <= sizeof(snap) && memTry(argp, snap, size)) {
+            pre = snap;
+            preSize = size;
+        }
+    }
+
+    int ret = gRealIoctl(fd, request, argp);
 
     if (esNvmap)
-        traceNvmapCmd(fd, request, argp, ret);
+        traceNvmapCmd(fd, request, pre, preSize, argp, ret);
 
     if (ret != 0)
         gIoctlFailed++;
