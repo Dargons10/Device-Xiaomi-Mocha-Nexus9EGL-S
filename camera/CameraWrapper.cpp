@@ -1242,8 +1242,16 @@ static const struct {
     float aperture;              /* ANDROID_LENS_INFO_AVAILABLE_APERTURES[0] */
     float phys_w_mm, phys_h_mm;  /* ANDROID_SENSOR_INFO_PHYSICAL_SIZE */
 } kMochaCameras[2] = {
-    /* camera0: IMX179, montaje 'back', angulo fisico 0 */
-    { "imx179(back)", ANDROID_LENS_FACING_BACK, 0,
+    /* camera0: IMX179, montaje 'back', angulo 90 para Android
+     * (2026-11-16, medido en el dispositivo con la camara abierta y foto real:
+     *   orientacion 0  -> el still salio 1920x1080 horizontal, EXIF Orientation 1 (girada 90)
+     *   orientacion 270 -> salio 1080x1920 vertical pero del derecho al reves
+     *   orientacion 90  -> salio 1080x1920 vertical correcta
+     * El 0 heredado de nvcamera.conf ('camera0=/dev/imx179,back,0') describe el montaje que declaro
+     * NVIDIA en 2015, pero el panel de mocha es 1536x2048 con rotacion natural 0 (dumpsys display;
+     * panel_rotation = dc->out->rotation = 0) y la salida JPEG debe entregarse en esa orientacion.
+     * nvcamera.conf se deja igual: esta funcion sobrescribe la etiqueta con el valor de la tabla. */
+    { "imx179(back)", ANDROID_LENS_FACING_BACK, 90,
       1920, 1080,
       { { 1920, 1080, 30 }, { 1280, 720, 90 }, { 640, 480, 90 }, { 0, 0, 0 } }, 3,
       ANDROID_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT_RGGB,
@@ -1279,6 +1287,10 @@ static const struct {
  * datos que hasta hoy estaban fijos en kMochaCameras:
  *   /data/local/tmp/mocha-sensor-max          con 'WxH'            -> maxima talla anunciada
  *   /data/local/tmp/mocha-sensor-orientation  con 0/90/180/270     -> ANDROID_SENSOR_ORIENTATION
+ *   /data/local/tmp/mocha-drop-16x9           cualquier contenido  -> descarta las tallas 16:9
+ *      (solo la trasera; sirve para medir si el HAL llega a montar el modo 3280x2460 cuando la app
+ *      ya no tiene una talla 16:9 donde elegir: la eleccion de PhotoModule sigue el aspecto del
+ *      preview, y con 1920x1080 disponible siempre gana 16:9).
  * Sin fichero el comportamiento es exactamente el de la tabla (cero riesgo sobre lo que ya funciona).
  *
  * Techo medido en el kernel: imx179.c define mode_3280x2460, mode_1920x1080 y mode_1280x720_90fps
@@ -1382,8 +1394,7 @@ static bool seed_static_metadata(camera_metadata_t **metadata_ptr, int camera_id
     }
     {
         unsigned int kw = 0, kh = 0;
-        if (mocha_knob_max_size(camera_id, &kw, &kh) && (kw != szs[0].w || kh != szs[0].h)) {
-            /* La nueva maxima pasa a szs[0]; se conservan las tres siguientes (el ISP escala
+        if (mocha_knob_max_size(camera_id, &kw, &kh) && (kw != szs[0].w || kh != szs[0].h)) {            /* La nueva maxima pasa a szs[0]; se conservan las tres siguientes (el ISP escala
              * desde el modo del sensor, y la app sigue ofreciendo sus tallas pequenas). */
             if (nsz < 4) {
                 for (int i = nsz; i > 0; i--) {
@@ -1406,6 +1417,36 @@ static bool seed_static_metadata(camera_metadata_t **metadata_ptr, int camera_id
             ALOGI("%s: camara %d maxima talla anunciada %ux%u (antes %ux%u, %d fps): el HAL pedira "
                   "ese par al driver del sensor", __FUNCTION__, camera_id, kw, kh, cam.sizes[0].w,
                   cam.sizes[0].h, szs[0].fps);
+        }
+    }
+    /* Tercer mando (solo trasera): quitar las tallas 16:9. Con 1920x1080 en la lista, la eleccion
+     * de talla fija de la app sigue el aspecto del preview y acaba eligiendo 16:9, que es lo que se
+     * midio en dmesg ('imx179_set_mode: xres 1920 yres 1080') aunque 3280x2460 estuviera anunciado.
+     * Sin fichero, la lista queda exactamente igual. */
+    if (camera_id == 0) {
+        FILE *f = fopen("/data/local/tmp/mocha-drop-16x9", "r");
+        if (f != NULL) {
+            fclose(f);
+            int kept = 0;
+            int dropped = 0;
+            for (int i = 0; i < nsz; i++) {
+                if (szs[i].w * 9 == szs[i].h * 16) {
+                    dropped++;
+                    continue;
+                }
+                szs[kept].w = szs[i].w;
+                szs[kept].h = szs[i].h;
+                szs[kept].fps = szs[i].fps;
+                kept++;
+            }
+            if (kept > 0 && dropped > 0) {
+                nsz = kept;
+                ALOGI("%s: camara %d knob mocha-drop-16x9: %d tallas 16:9 descartadas, %d restantes "
+                      "(maxima %ux%u)", __FUNCTION__, camera_id, dropped, nsz, szs[0].w, szs[0].h);
+            } else if (dropped > 0) {
+                ALOGE("%s: camara %d knob mocha-drop-16x9 descartaria TODAS las tallas; ignorado",
+                      __FUNCTION__, camera_id);
+            }
         }
     }
 
