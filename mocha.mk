@@ -415,3 +415,7 @@ PRODUCT_PACKAGES += \
 PRODUCT_PROPERTY_OVERRIDES += \
     ro.lineage.build.vendor_security_patch=2018-01-05 \
     ro.vendor.build.security_patch=2018-01-05
+
+# Puerta de registro (T-02): un brunch de mocha no arranca si el registro de parches no
+# reproduce el arbol.  Ver patches/README.md y patches/check.sh.
+include $(LOCAL_PATH)/patches/registry_gate.mk
