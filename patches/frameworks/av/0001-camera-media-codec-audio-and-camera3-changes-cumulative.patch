@@ -1,5 +1,13 @@
+# frameworks/av: cumulative camera + codec + audio changes for mocha (Tegra blobs, kernel 3.10)
+#
+# Regenerado 2026-11-16 con: git -C frameworks/av diff HEAD  -> 21 ficheros.
+# Antes cubria 19 y dejaba fuera camera/VendorTagDescriptor.cpp y
+#   services/camera/libcameraservice/common/CameraProviderManager.cpp (UNREG) y su hunk de
+#   camera/Android.bp no reproducia el arbol (RESIDUAL: la marca de vendor tags que anade
+#   el wrapper del HAL se declara ahi).
+#
 diff --git a/camera/Android.bp b/camera/Android.bp
-index 1924e80b78..0c9c4ae8cf 100644
+index 1924e80b78..3b3a7c4c89 100644
 --- a/camera/Android.bp
 +++ b/camera/Android.bp
 @@ -47,6 +47,16 @@ cc_library_shared {
@@ -19,6 +27,38 @@ index 1924e80b78..0c9c4ae8cf 100644
      aidl: {
          export_aidl_headers: true,
          local_include_dirs: ["aidl"],
+@@ -118,6 +128,13 @@ cc_library_static {
+     ],
+     srcs: ["CameraParameters.cpp"],
+ 
++    // mocha: 'libcamera_client' tiene variant vendor (para enlazar el wrapper HAL1
++    // camera.tegra.so), y una variant vendor exige que SUS dependencias estaticas
++    // tambien la tengan.  Sin esto Soong falla con:
++    //   error: dependency "libcamera_parameters" of "libcamera_client" missing variant:
++    //     os:android,image:vendor.32,arch:arm_armv7-a-neon,sdk:,link:static
++    vendor_available: true,
++
+ }
+ 
+ // AIDL interface between camera clients and the camera service.
+diff --git a/camera/VendorTagDescriptor.cpp b/camera/VendorTagDescriptor.cpp
+index 24fa912d53..492777ccbb 100644
+--- a/camera/VendorTagDescriptor.cpp
++++ b/camera/VendorTagDescriptor.cpp
+@@ -480,6 +480,13 @@ int VendorTagDescriptorCache::getTagType(uint32_t tag,
+ void VendorTagDescriptorCache::dump(int fd, int verbosity,
+         int indentation) const {
+     for (const auto &desc : mVendorMap) {
++        // Mismo caso que CameraProviderManager::setUpVendorTags (mocha, HAL sin vendor tags):
++        // una entrada nula aqui producía un SIGSEGV en 'dumpsys media.camera'.
++        if (desc.second == nullptr) {
++            dprintf(fd, "%*svendor id %" PRIu64 ": sin descriptor\n",
++                    indentation, "", desc.first);
++            continue;
++        }
+         dprintf(fd, "%*sDumping vendor tag descriptors for vendor with"
+                 " id %" PRIu64 " \n", indentation, "", desc.first);
+         desc.second->dump(fd, verbosity, indentation);
 diff --git a/media/codec2/components/aac/C2SoftAacDec.cpp b/media/codec2/components/aac/C2SoftAacDec.cpp
 index 57cdcd0a9d..068b71a87a 100644
 --- a/media/codec2/components/aac/C2SoftAacDec.cpp
@@ -1160,6 +1200,27 @@ index 1dd41b337b..0d6abc7581 100644
      int rc = mDevicesFactoryHal->openDevice(name, &dev);
      if (rc) {
          ALOGE("loadHwModule() error %d loading module %s", rc, name);
+diff --git a/services/camera/libcameraservice/common/CameraProviderManager.cpp b/services/camera/libcameraservice/common/CameraProviderManager.cpp
+index 74405ee7b0..a4417ad6fa 100644
+--- a/services/camera/libcameraservice/common/CameraProviderManager.cpp
++++ b/services/camera/libcameraservice/common/CameraProviderManager.cpp
+@@ -343,6 +343,16 @@ status_t CameraProviderManager::setUpVendorTags() {
+     sp<VendorTagDescriptorCache> tagCache = new VendorTagDescriptorCache();
+ 
+     for (auto& provider : mProviders) {
++        // mocha: los HAL heredados (camera.tegra.so de 2015 a traves del provider legacy 2.4)
++        // no definen vendor tags, asi que ProviderInfo::setUpVendorTags() deja
++        // mVendorTagDescriptor en nullptr.  Meter esa entrada nula en el cache hacia que
++        // 'dumpsys media.camera' (CameraService::dump -> VendorTagDescriptorCache::dump)
++        // dereferenciara un puntero nulo y MATARIA mediaserver, que es quien hospeda el
++        // servicio de camara en este dispositivo.  Medido el 2026-11-08: tombstone_01
++        // SIGSEGV fault addr 0x20, y como consecuencia 'Allowed user IDs' se quedaba vacio
++        // (el proxy de system_server no vuelve a empujar la lista cuando cameraserver/mediaserver
++        // se reinicia) y toda app de camara quedaba rechazada hasta reiniciar la tablet.
++        if (provider->mVendorTagDescriptor == nullptr) continue;
+         tagCache->addVendorDescriptor(provider->mProviderTagid, provider->mVendorTagDescriptor);
+     }
+ 
 diff --git a/services/camera/libcameraservice/device3/Camera3Device.cpp b/services/camera/libcameraservice/device3/Camera3Device.cpp
 index 8f080bec87..7e92c3290a 100644
 --- a/services/camera/libcameraservice/device3/Camera3Device.cpp

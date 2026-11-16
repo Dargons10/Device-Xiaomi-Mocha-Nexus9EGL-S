@@ -1,0 +1,626 @@
+# Camera2: cumulative changes for the Tegra stock camera path (Plan A, HAL 3.0 de 2015)
+#
+# Por que: la captura still del blob no entrega un JPEG valido hasta que el encoder nativo
+#   funcione (ver AUDITORIA K-15/K-31/K-36). Estos cambios hacen que la app sobreviva a ese
+#   fallo y no pierda la sesion: guardado tolerante sin EXIF, deteccion de modulo nulo,
+#   manager de camaras legacy tolerante, y manejo de PhotoModule/CaptureModule sin NPE.
+# Generado con: git -C packages/apps/Camera2 diff HEAD   (10 ficheros), 2026-11-16.
+# Estado anterior sustituto: ../Camera2.disabled/0001-selfie-preview-npe-fallback.patch
+#   (su contenido ya esta commiteado en 903b589a2 y por eso marcaba BROKEN).
+#
+diff --git a/src/com/android/camera/CameraActivity.java b/src/com/android/camera/CameraActivity.java
+index 5d7b7bb5d..3db2d63d9 100644
+--- a/src/com/android/camera/CameraActivity.java
++++ b/src/com/android/camera/CameraActivity.java
+@@ -1438,6 +1438,54 @@ public class CameraActivity extends QuickActivity
+                 }
+             };
+ 
++    /*
++     * mocha (12-11-2026): tras un fallo de coneccion de camara NO cerramos la app: cerramos
++     * y reabrimos la sesion.  Motivo medido: la frontal falla siempre (blob stock no
++     * inicializa el OV5693 -> -ENODEV) y el handler original terminaba la actividad, con lo
++     * que Camera2 desaparecia al pulsar el boton de cambiar de camara.
++     */
++    private void reabrirCamaraMocha() {
++        Log.i(TAG, "mocha: reintento de reapertura de la sesion de camara tras un fallo");
++        mCameraFatalError = false;   /* si no, el guard impide volver a intentarlo nunca */
++        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() {
++            @Override
++            public void run() {
++                try {
++                    if (mCameraController == null || isFinishing()) {
++                        return;
++                    }
++                    /* MEDIDO 12-11-2026 22:01:53: forzar close+request con la activity pausada
++                     * provocaba el crash Java
++                     *   java.lang.IllegalStateException: Camera opened but the module shouldn't
++                     *       be requesting   (CameraActivity.onCameraOpened, linea 523)
++                     * y mataba la app (Force finishing + 'Process com.android.camera2 has died').
++                     * Reglas: NUNCA reabrimos con la activity pausada, y NUNCA reabrimos si ya
++                     * hay una camara abierta o en espera (en el caso medido la trasera estaba
++                     * abierta y el error de la frontal llego DESPUES: no hay que tocar nada). */
++                    if (mPaused) {
++                        Log.i(TAG, "mocha: activity pausada: no reabrimos la camara (evita el "
++                                + "IllegalStateException de onCameraOpened)");
++                        return;
++                    }
++                    if (mCameraController.getCurrentCameraId() != null
++                            || mCameraController.waitingForCamera()) {
++                        Log.i(TAG, "mocha: ya hay una camara abierta o en espera; el aviso basta, "
++                                + "no hace falta reabrir");
++                        return;
++                    }
++                    com.android.camera.device.CameraId cam = mCameraController.getCurrentCameraId();
++                    if (cam != null && cam.hasLeagcyValue()) {
++                        Log.i(TAG, "mocha: no hay camara abierta: pedimos la camara "
++                                + cam.getLegacyValue() + " de nuevo");
++                        mCameraController.requestCamera(cam.getLegacyValue());
++                    }
++                } catch (Exception ex) {
++                    Log.e(TAG, "mocha: fallo al reabrir la sesion de camara", ex);
++                }
++            }
++        }, 1200);
++    }
++
+     @Override
+     public void onNewIntentTasks(Intent intent) {
+         onModeSelected(getModeIndex());
+@@ -1456,7 +1504,8 @@ public class CameraActivity extends QuickActivity
+         mSoundPlayer = new SoundPlayer(mAppContext);
+         mFeatureConfig = OneCameraFeatureConfigCreator.createDefault(getContentResolver(),
+                 getServices().getMemoryManager());
+-        mFatalErrorHandler = new FatalErrorHandlerImpl(this);
++        // mocha: el handler NO mata la app ante un fallo de camara; avisa y reabre la sesion.
++        mFatalErrorHandler = new FatalErrorHandlerImpl(this, this::reabrirCamaraMocha);
+         checkPermissions();
+         if (!mHasCriticalPermissions) {
+             Log.v(TAG, "onCreate: Missing critical permissions.");
+diff --git a/src/com/android/camera/CaptureModule.java b/src/com/android/camera/CaptureModule.java
+index 1068bcf52..ab4c89985 100644
+--- a/src/com/android/camera/CaptureModule.java
++++ b/src/com/android/camera/CaptureModule.java
+@@ -1294,6 +1294,26 @@ public class CaptureModule extends CameraModule implements
+         }
+ 
+         Size previewBufferSize = mCamera.pickPreviewSize(mPictureSize, mUI.getActivity());
++        if (previewBufferSize == null) {
++            /* mocha (11-11-2026): guardado contra NPE MEDIDO en el dispositivo:
++             *   E/AndroidRuntime: FATAL EXCEPTION: CaptureModule.mCameraHandler
++             *   java.lang.NullPointerException: Attempt to invoke virtual method
++             *     'int com.android.camera.util.Size.getWidth()' on a null object reference
++             *     at com.android.camera.CaptureModule.updatePreviewBufferDimension(CaptureModule.java:1297)
++             * Pasaba abriendo la camara FRONTAL: nuestro catalogo anunciaba JPEG 16:9 (1920x1080)
++             * pero preview solo en 2592x1944 (4:3), getOptimalPreviewSize devolvia null y la app
++             * petaba.  El catalogo ya va filtrado por aspectos, pero aqui ademas NO asumimos que
++             * el HAL sea perfecto: si no hay preview elegido, se cae al tamito de foto y, si
++             * tampoco, al modo nativo del sensor.  Una app que peta no arregla nada y ocultaba el
++             * problema de fondo. */
++            Log.w(TAG, "pickPreviewSize devolvio null (pictureSize=" + mPictureSize
++                    + "): se usa un tamito de reserva en lugar de petar");
++            previewBufferSize = mPictureSize;
++        }
++        if (previewBufferSize == null) {
++            previewBufferSize = new Size(1920, 1080);
++            Log.w(TAG, "tampoco hay pictureSize: se usa 1920x1080 (modo nativo del IMX179)");
++        }
+         mPreviewBufferWidth = previewBufferSize.getWidth();
+         mPreviewBufferHeight = previewBufferSize.getHeight();
+ 
+diff --git a/src/com/android/camera/CaptureModuleUtil.java b/src/com/android/camera/CaptureModuleUtil.java
+index d2808abcf..1993abddd 100644
+--- a/src/com/android/camera/CaptureModuleUtil.java
++++ b/src/com/android/camera/CaptureModuleUtil.java
+@@ -84,6 +84,24 @@ public class CaptureModuleUtil {
+             }
+         }
+ 
++        // mocha (11-11-2026): CRASH MEDIDO en el dispositivo al abrir la camara FRONTAL:
++        //   E/AndroidRuntime: FATAL EXCEPTION: CaptureModule.mCameraHandler
++        //   java.lang.NullPointerException: ... 'com.android.camera.util.Size.getWidth()'
++        //     at com.android.camera.CaptureModule.updatePreviewBufferDimension(CaptureModule.java:1297)
++        // Causa: MAX_ASPECT_HEIGHT = 1080 descarta cualquier preview con alto > 1080.  El OV5693
++        // entrega su modo NATIVO 2592x1944 (alto 1944), asi que camera1Sizes quedaba VACIO,
++        // CameraUtil.getOptimalPreviewSizeIndex devolvia -1 y aqui devolviamos null -> la app
++        // petaba.  Este HAL no escala (los modos son nativos: 1920x1080 detras, 2592x1944
++        // delante), asi que si el filtro de 1080 no deja ninguno, se usan TODOS los disponibles.
++        if (camera1Sizes.isEmpty()) {
++            for (Size s : sizes) {
++                camera1Sizes.add(new Size(s.getWidth(), s.getHeight()));
++            }
++        }
++        if (camera1Sizes.isEmpty()) {
++            return null;
++        }
++
+         int optimalIndex = CameraUtil
+                 .getOptimalPreviewSizeIndex(camera1Sizes, targetRatio,
+                         aspectRatioTolerance, context);
+diff --git a/src/com/android/camera/FatalErrorHandlerImpl.java b/src/com/android/camera/FatalErrorHandlerImpl.java
+index 802abc6af..8b08f74c2 100644
+--- a/src/com/android/camera/FatalErrorHandlerImpl.java
++++ b/src/com/android/camera/FatalErrorHandlerImpl.java
+@@ -17,6 +17,8 @@
+ package com.android.camera;
+ 
+ import android.app.Activity;
++import android.content.ContentResolver;
++import android.provider.Settings;
+ 
+ import com.android.camera.debug.Log;
+ import com.android.camera.stats.UsageStatistics;
+@@ -27,9 +29,84 @@ public final class FatalErrorHandlerImpl implements FatalErrorHandler {
+     private static final Log.Tag TAG = new Log.Tag("FatalErrorHandler");
+ 
+     private final Activity mActivity;
++    /* mocha (12-11-2026): runnable opcional que reabre la sesion de camara cuando el
++     * error se trata sin cerrar la app.  Se inyecta desde CameraActivity. */
++    private final Runnable mReintento;
+ 
+     public FatalErrorHandlerImpl(Activity activity) {
++        this(activity, null);
++    }
++
++    public FatalErrorHandlerImpl(Activity activity, Runnable reintento) {
+         mActivity = activity;
++        mReintento = reintento;
++    }
++
++    /*
++     * mocha: la app esta disenada para MORIR ante un fallo de camara: los Reason declaran
++     * doesFinishActivity() y CameraUtil.showError() acaba de terminar la actividad.  En esta
++     * maquina la frontal falla de forma conocida (el blob stock de 2015 no inicializa el
++     * OV5693: 'connectHelper:1883: Failed to initialize camera "1": No such device (-19)'),
++     * y eso hacia que Camera2 se cerrara sola cada vez que el usuario pulsaba el boton de
++     * cambiar de camara: eso es lo que se percibe como "la camara crashea" (medido
++     * 12-11-2026 21:37-21:40: NI 'FATAL EXCEPTION', NI tombstone, NI ANR: Camera2 acabando
++     * voluntariamente por este camino).
++     * Cambio: por defecto NO terminamos la actividad; avisamos y REINTENTAMOS la sesion.
++     * Comportamiento original:  settings put global mocha_camera_fatal_finish 1
++     */
++    private static boolean hayQueTerminarActividad(ContentResolver cr, Reason reason) {
++        if (!reason.doesFinishActivity()) {
++            return false;
++        }
++        try {
++            return Settings.Global.getInt(cr, "mocha_camera_fatal_finish", 0) != 0;
++        } catch (Exception ex) {
++            return false;   /* si no se puede leer el knob, nos quedamos con la vida: es lo seguro */
++        }
++    }
++
++    /** (R) CameraUtil.showError() construye un AlertDialog, y un Dialog necesita el hilo UI.
++     *  Este manejador se invoca tambien desde hilos de background (CaptureModule.openCameraAnd
++     *  StartPreview corre en un AsyncTask), y mostrar el aviso 'a pelo' producia un crash:
++     *    java.lang.RuntimeException: Can't create handler inside thread Thread[AsyncTask #2,5,main]
++     *        that has not called Looper.prepare()
++     *      at android.app.Dialog.<init>(Dialog.java:135)
++     *      at android.app.AlertDialog$Builder.show(AlertDialog.java:1130)
++     *      at com.android.camera.util.CameraUtil.showError(CameraUtil.java:327)
++     *      at com.android.camera.FatalErrorHandlerImpl.onCameraDisabledFailure(...:152)
++     *      at com.android.camera.one.v2.Camera2OneCameraOpenerImpl.open(...:212)
++     *    (medido 13-11-2026 22:15:24.042  'FATAL EXCEPTION: AsyncTask #2', Process:
++     *     com.android.camera2, PID 2936)  => el propio aviso de "hay un problema con la camara"
++     *    mataba la app.  Todos los avisos se publican ahora en el hilo UI. */
++    private void mostrarAviso(final int dialogMsgId, final int feedbackMsgId,
++                              final boolean finishActivity, final Exception ex) {
++        try {
++            mActivity.runOnUiThread(new Runnable() {
++                @Override
++                public void run() {
++                    CameraUtil.showError(mActivity, dialogMsgId, feedbackMsgId, finishActivity, ex);
++                }
++            });
++        } catch (Exception otros) {
++            Log.e(TAG, "mocha: no se pudo publicar el aviso de error de camara en el hilo UI",
++                    otros);
++        }
++    }
++
++    private void avisarYReintentar(Reason reason, Exception ex) {
++        boolean finishActivity = hayQueTerminarActividad(mActivity.getContentResolver(), reason);
++        if (!finishActivity) {
++            Log.i(TAG, "mocha: fallo de camara ('" + reason.name() + "') tratado SIN cerrar la app"
++                    + (mReintento != null ? " + reintento de sesion" : ""));
++            if (mReintento != null) {
++                try {
++                    mReintento.run();
++                } catch (Exception ex2) {
++                    Log.e(TAG, "mocha: el reintento de la sesion fallo", ex2);
++                }
++            }
++        }
++        mostrarAviso(reason.getDialogMsgId(), reason.getFeedbackMsgId(), finishActivity, ex);
+     }
+ 
+     @Override
+@@ -43,8 +120,8 @@ public final class FatalErrorHandlerImpl implements FatalErrorHandler {
+ 
+         Reason reason = Reason.MEDIA_STORAGE_FAILURE;
+         boolean finishActivity = reason.doesFinishActivity();
+-        CameraUtil.showError(mActivity, reason.getDialogMsgId(), reason.getFeedbackMsgId(),
+-                finishActivity, ex);
++        /* (R) idem: este manejador puede llegar desde cualquier hilo */
++        mostrarAviso(reason.getDialogMsgId(), reason.getFeedbackMsgId(), finishActivity, ex);
+     }
+ 
+     @Override
+@@ -57,10 +134,7 @@ public final class FatalErrorHandlerImpl implements FatalErrorHandler {
+                 eventprotos.CameraFailure.FailureReason.OPEN_FAILURE, null,
+                 UsageStatistics.NONE, UsageStatistics.NONE);
+ 
+-        Reason reason = Reason.CANNOT_CONNECT_TO_CAMERA;
+-        boolean finishActivity = reason.doesFinishActivity();
+-        CameraUtil.showError(mActivity, reason.getDialogMsgId(), reason.getFeedbackMsgId(),
+-                finishActivity, ex);
++                avisarYReintentar(Reason.CANNOT_CONNECT_TO_CAMERA, ex);
+     }
+ 
+     @Override
+@@ -73,10 +147,7 @@ public final class FatalErrorHandlerImpl implements FatalErrorHandler {
+                 eventprotos.CameraFailure.FailureReason.RECONNECT_FAILURE, null,
+                 UsageStatistics.NONE, UsageStatistics.NONE);
+ 
+-        Reason reason = Reason.CANNOT_CONNECT_TO_CAMERA;
+-        boolean finishActivity = reason.doesFinishActivity();
+-        CameraUtil.showError(mActivity, reason.getDialogMsgId(), reason.getFeedbackMsgId(),
+-                finishActivity, ex);
++                avisarYReintentar(Reason.CANNOT_CONNECT_TO_CAMERA, ex);
+     }
+ 
+     @Override
+@@ -89,10 +160,7 @@ public final class FatalErrorHandlerImpl implements FatalErrorHandler {
+                 eventprotos.CameraFailure.FailureReason.UNKNOWN_REASON, null,
+                 UsageStatistics.NONE, UsageStatistics.NONE);
+ 
+-        Reason reason = Reason.CANNOT_CONNECT_TO_CAMERA;
+-        boolean finishActivity = reason.doesFinishActivity();
+-        CameraUtil.showError(mActivity, reason.getDialogMsgId(), reason.getFeedbackMsgId(),
+-                finishActivity, ex);
++                avisarYReintentar(Reason.CANNOT_CONNECT_TO_CAMERA, ex);
+     }
+ 
+     @Override
+@@ -108,8 +176,9 @@ public final class FatalErrorHandlerImpl implements FatalErrorHandler {
+ 
+         Reason reason = Reason.CAMERA_DISABLED_BY_SECURITY_POLICY;
+         boolean finishActivity = reason.doesFinishActivity();
+-        CameraUtil.showError(mActivity, reason.getDialogMsgId(), reason.getFeedbackMsgId(),
+-                finishActivity, ex);
++        /* (R) AQUÍ fue donde crasheo (FatalErrorHandlerImpl.java:152): se llamaba desde el
++         * AsyncTask de CaptureModule.openCameraAndStartPreview */
++        mostrarAviso(reason.getDialogMsgId(), reason.getFeedbackMsgId(), finishActivity, ex);
+     }
+ 
+     @Override
+@@ -118,8 +187,6 @@ public final class FatalErrorHandlerImpl implements FatalErrorHandler {
+         // Log a stack trace to be sure we can track the source.
+         Log.e(TAG, "Handling Fatal Error:", ex);
+ 
+-        boolean finishActivity = reason.doesFinishActivity();
+-        CameraUtil.showError(mActivity, reason.getDialogMsgId(), reason.getFeedbackMsgId(),
+-                finishActivity, ex);
++        avisarYReintentar(reason, ex);
+     }
+ }
+diff --git a/src/com/android/camera/PhotoModule.java b/src/com/android/camera/PhotoModule.java
+index 7f42aaac7..166ac5d08 100644
+--- a/src/com/android/camera/PhotoModule.java
++++ b/src/com/android/camera/PhotoModule.java
+@@ -824,6 +824,14 @@ public class PhotoModule
+         float targetAspectRatio = dataBundle.targetAspectRatio;
+ 
+         Bitmap original = BitmapFactory.decodeByteArray(jpegData, 0, jpegData.length);
++        /* mocha (10-11-2026): con el HAL Tegra el JPEG puede llegar ilegible y aqui se petaba
++         * el hilo con 'NullPointerException: getWidth() on null'.  Si no se decodifica, se
++         * devuelve el JPEG original tal cual. */
++        if (original == null) {
++            Log.e(TAG, "mocha: cropJpegDataToAspectRatio: JPEG no decodificable ("
++                    + (jpegData == null ? 0 : jpegData.length) + " bytes) -> se guarda sin tocar");
++            return dataBundle;
++        }
+         int originalWidth = original.getWidth();
+         int originalHeight = original.getHeight();
+         int newWidth;
+@@ -843,6 +851,21 @@ public class PhotoModule
+             return dataBundle;
+         }
+ 
++        /* mocha (10-11-2026, medido): aunque el recorte no recorte nada, aqui se hace
++         * BitmapFactory.decodeByteArray + Bitmap.createBitmap + Bitmap.compress(JPEG, 90), o sea
++         * el JPEG que produjo nuestro adapter (libjpeg, calidad 88, talla nativa 1:1) se decodifica
++         * y se VUELVE A CODIFICAR con Skia: 671718 -> 651297 bytes, tablas DQT que no son las de
++         * libjpeg y APP2 'ICC_PROFILE' de 552 B (firma de Skia)  -> doble JPEG.
++         * Con preview y JPEG nativos (16:9) el aspect ratio objetivo coincide con el del frame,
++         * asi que el recorte es vacio: en ese caso se pasa el bitstream del HAL tal cual. */
++        if (xOffset == 0 && yOffset == 0 && newWidth == originalWidth
++                && newHeight == originalHeight) {
++            Log.i(TAG, "mocha: cropJpegDataToAspectRatio: recorte vacio " + originalWidth + "x"
++                    + originalHeight + " ratio=" + targetAspectRatio
++                    + " -> se guarda el JPEG del HAL sin re-codificar");
++            return dataBundle;
++        }
++
+         Bitmap resized = Bitmap.createBitmap(original,xOffset,yOffset,newWidth, newHeight);
+         exif.setTagValue(ExifInterface.TAG_PIXEL_X_DIMENSION, new Integer(newWidth));
+         exif.setTagValue(ExifInterface.TAG_PIXEL_Y_DIMENSION, new Integer(newHeight));
+diff --git a/src/com/android/camera/Storage.java b/src/com/android/camera/Storage.java
+index c1d15af00..aac20cdeb 100644
+--- a/src/com/android/camera/Storage.java
++++ b/src/com/android/camera/Storage.java
+@@ -131,11 +131,56 @@ public class Storage {
+             int height, String mimeType) throws IOException {
+ 
+         if (data.length >= 0) {
++            /* mocha (10-11-2026, medido): aqui se decodificaba nuestro JPEG a Bitmap y luego
++             * addImageToMediaStore -> writeBitmap -> exif.writeExif(bitmap, os) ->
++             * bmap.compress(Bitmap.CompressFormat.JPEG, 90, s).  Resultado medido en
++             * /sdcard/Pictures: tablas DQT identicas a las de libjpeg calidad 90 (la nuestra es
++             * 88), APP2 'ICC_PROFILE' de 552 B y 573049 -> 553065 bytes.  O sea: el JPEG nativo
++             * 1:1 que producia el adapter se VOLVIA A CODIFICAR (doble JPEG, perdida).
++             * Ahora los bytes se vuelcan TAL CUAL y el EXIF se inserta encima con
++             * ExifInterface.writeExif(byte[], OutputStream) (linea 798: s.write(jpeg,0,len),
++             * sin re-codificar). */
++            return addImageBytesToMediaStore(resolver, title, date, location, orientation, data,
++                    width, height, mimeType, exif);
++        }
++        return null;
++    }
++
++    /** mocha: version que NO decodifica a Bitmap: escribe el JPEG del HAL byte a byte y le
++     *  inserta el EXIF.  Evita el 'Bitmap.compress(JPEG, 90)' de writeBitmap(). */
++    public Uri addImageBytesToMediaStore(ContentResolver resolver, String title, long date,
++            Location location, int orientation, byte[] data, int width, int height,
++            String mimeType, ExifInterface exif) throws IOException {
++        ContentValues values = getContentValuesForData(title, date, location, mimeType, true);
++        Uri uri = null;
++        try {
++            uri = resolver.insert(Media.EXTERNAL_CONTENT_URI, values);
++            OutputStream os = resolver.openOutputStream(uri);
++            try {
++                if (exif != null) {
++                    exif.writeExif(data, os);
++                } else {
++                    os.write(data, 0, data.length);
++                }
++            } finally {
++                os.close();
++            }
++            ContentValues publishValues = new ContentValues();
++            publishValues.put(Media.IS_PENDING, 0);
++            resolver.update(uri, publishValues, null, null);
++            Log.i(TAG, "mocha: JPEG guardado verbatim (" + data.length + " bytes, "
++                    + width + "x" + height + ") uri=" + uri);
++        } catch (Throwable th) {
++            Log.e(TAG, "mocha: fallo escribiendo el JPEG verbatim (" + th + "), se prueba la via "
++                    + "clasica con Bitmap", th);
++            if (uri != null) {
++                resolver.delete(uri, null);
++            }
+             Bitmap bitmap = BitmapFactory.decodeByteArray(data, 0, data.length);
+             return addImageToMediaStore(resolver, title, date, location, orientation, data.length,
+                     bitmap, width, height, mimeType, exif);
+         }
+-        return null;
++        return uri;
+     }
+ 
+     /**
+@@ -292,9 +337,63 @@ public class Storage {
+     public Uri updateImage(Uri imageUri, ContentResolver resolver, String title, long date,
+            Location location, int orientation, ExifInterface exif,
+            byte[] jpeg, int width, int height, String mimeType) throws IOException {
+-        Bitmap bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
+-        return updateImage(imageUri, resolver, title, date, location, orientation, jpeg.length,
+-                bitmap, width, height, mimeType, exif);
++        /* mocha (10-11-2026, medido): esta es LA RUTA REAL del guardado en el modulo one/v2
++         * (CaptureModule): placeholder -> updateImage(sessionUri, ... byte[] jpeg ...).
++         * Antes decodificaba nuestro JPEG a Bitmap y lo mandaba a addImageToMediaStore ->
++         * writeBitmap -> exif.writeExif(bitmap, os) -> bmap.compress(JPEG, 90).
++         * Medido en /sdcard/Pictures/IMG_20261110_093938.jpg: tablas DQT identicas a libjpeg
++         * calidad 90 (la nuestra es 88), APP2 'ICC_PROFILE' de 552 B y 551719 -> 531264 bytes:
++         * el JPEG nativo 1:1 del sensor se VOLVIA A CODIFICAR.  Ahora los bytes se vuelcan TAL
++         * CUAL y el EXIF se inserta encima (ExifInterface.writeExif(byte[], OutputStream)).
++         * Si la escritura directa falla se cae a la via clasica con Bitmap para no perder foto. */
++        Uri resultUri = imageUri;
++        if (isSessionUri(imageUri)) {
++            resultUri = addImageBytesToMediaStore(resolver, title, date, location, orientation,
++                    jpeg, width, height, mimeType, exif);
++            if (resultUri == null) {
++                Bitmap bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
++                resultUri = addImageToMediaStore(resolver, title, date, location, orientation,
++                        jpeg.length, bitmap, width, height, mimeType, exif);
++            }
++            sSessionsToContentUris.put(imageUri, resultUri);
++            sContentUrisToSessions.put(resultUri, imageUri);
++            return resultUri;
++        }
++
++        ContentValues values = getContentValuesForData(title, date, location, mimeType, false);
++        resolver.update(imageUri, values, null, null);
++        boolean escrito = false;
++        try {
++            escrito = escribeBytesDirectos(imageUri, resolver, jpeg, exif);
++        } catch (Throwable th) {
++            Log.e(TAG, "mocha: no se pudo re-escribir " + imageUri + ": " + th);
++        }
++        if (!escrito) {
++            Bitmap bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
++            writeBitmap(imageUri, exif, bitmap, resolver);
++        }
++        Log.i(TAG, "Image with uri: " + imageUri + " was updated in the MediaStore");
++        return resultUri;
++    }
++
++    /** mocha: vuelca el JPEG byte a byte sobre un uri existente del MediaStore (sin Bitmap). */
++    private boolean escribeBytesDirectos(Uri uri, ContentResolver resolver, byte[] jpeg,
++            ExifInterface exif) throws IOException {
++        OutputStream os = resolver.openOutputStream(uri, "wt");
++        if (os == null) {
++            return false;
++        }
++        try {
++            if (exif != null) {
++                exif.writeExif(jpeg, os);
++            } else {
++                os.write(jpeg, 0, jpeg.length);
++            }
++        } finally {
++            os.close();
++        }
++        Log.i(TAG, "mocha: JPEG guardado verbatim (" + jpeg.length + " bytes) uri=" + uri);
++        return true;
+     }
+ 
+     private Uri generateUniquePlaceholderUri() {
+diff --git a/src/com/android/camera/module/ModulesInfo.java b/src/com/android/camera/module/ModulesInfo.java
+index 87090ae25..55deb76aa 100644
+--- a/src/com/android/camera/module/ModulesInfo.java
++++ b/src/com/android/camera/module/ModulesInfo.java
+@@ -24,6 +24,8 @@ import com.android.camera.CaptureModule;
+ import com.android.camera.PhotoModule;
+ import com.android.camera.VideoModule;
+ import com.android.camera.app.AppController;
++import android.provider.Settings;
++
+ import com.android.camera.app.ModuleManager;
+ import com.android.camera.captureintent.CaptureIntentModule;
+ import com.android.camera.debug.Log;
+@@ -51,8 +53,28 @@ public class ModulesInfo {
+         registerPhotoModule(moduleManager, photoModuleId, SettingsScopeNamespaces.PHOTO,
+                 config.isUsingCaptureModule());
+         moduleManager.setDefaultModuleIndex(photoModuleId);
+-        registerVideoModule(moduleManager, res.getInteger(R.integer.camera_mode_video),
+-                SettingsScopeNamespaces.VIDEO);
++        // mocha (LineageOS 19.1, 12-11-2026): el modulo de VIDEO de Camera2 usa el camino
++        // API1 (VideoModule -> Camera2Client -> CameraService::createSurfaceFromGbp) y en esta
++        // maquina eso es letal: medido en la sesion de las 07:21-07:22 --
++        //   E/CameraService(293): connectHelper: Could not initialize client from HAL.
++        //   W/mediaserver(293): createSurfaceFromGbp: Camera 0: Overriding format 0x1 to
++        //       IMPLEMENTATION_DEFINED            (consumption usage 256 = HW_TEXTURE)
++        //   dumpsys media.camera: DIED client(s) with PID 293 (Binder died unexpectedly)
++        // y aqui PID 293 es 'mediaserver', que A LA VEZ es el CameraService de esta build y
++        // tiene abiertos /dev/nvmap y /dev/nvhost-ctrl (codificadores Tegra VIC): camera +
++        // codificador en el mismo proceso.  La app moria (PID 1883 -> 2042 -> 2203) y la tablet
++        // se bloqueaba al rato.  Por defecto NO se registra el modulo de VIDEO.
++        // Reactivar (bajo tu riesgo): settings put global mocha_camera_video 1
++        if (Settings.Global.getInt(context.getContentResolver(), "mocha_camera_video", 0) != 0) {
++            registerVideoModule(moduleManager, res.getInteger(R.integer.camera_mode_video),
++                    SettingsScopeNamespaces.VIDEO);
++            Log.i(TAG, "mocha: modulo de VIDEO registrado (mocha_camera_video=1): camino API1, "
++                    + "implica mediaserver + nvhost. Riesgo de bloqueo medido.");
++        } else {
++            Log.i(TAG, "mocha: modulo de VIDEO NO registrado. Motivo: el camino API1 del "
++                    + "VideoModule se medi6 como causa del bloqueo (mediaserver/CameraService "
++                    + "murio con la camara abierta).");
++        }
+         if (PhotoSphereHelper.hasLightCycleCapture(context)) {
+             registerWideAngleModule(moduleManager, res.getInteger(R.integer.camera_mode_panorama),
+                     SettingsScopeNamespaces.PANORAMA);
+diff --git a/src/com/android/camera/one/v2/Camera2OneCameraManagerImpl.java b/src/com/android/camera/one/v2/Camera2OneCameraManagerImpl.java
+index d1e0b5b8d..07f66f691 100644
+--- a/src/com/android/camera/one/v2/Camera2OneCameraManagerImpl.java
++++ b/src/com/android/camera/one/v2/Camera2OneCameraManagerImpl.java
+@@ -193,6 +193,17 @@ public class Camera2OneCameraManagerImpl implements OneCameraManager {
+             }
+         } catch (CameraAccessException ex) {
+             Log.w(TAG, "Unable to get camera ID", ex);
++        } catch (IllegalArgumentException ex) {
++            /* (Q) Si el provider de camara acaba de morir y la tabla del framework esta aún
++             * podrida, getCameraCharacteristics lanza
++             *   java.lang.IllegalArgumentException: supportsCameraApi:2594: Unknown camera ID 0
++             * (medido 13-11-2026 22:11:53 y 22:12:02: Camera2 muriendo con FATAL EXCEPTION en
++             *  CameraActivity.onCreateTasks).  Lo convertimos en "no hay camara de ese tipo", que
++             * es lo que el resto de la app ya sabe manejar. */
++            Log.w(TAG, "mocha: enumeracion de camaras inconsistente (HAL muerto/reabiendose?)",
++                    ex);
++        } catch (Exception ex) {
++            Log.w(TAG, "mocha: fallo inesperado enumerando camaras", ex);
+         }
+         return null;
+     }
+diff --git a/src/com/android/camera/processing/imagebackend/TaskCompressImageToJpeg.java b/src/com/android/camera/processing/imagebackend/TaskCompressImageToJpeg.java
+index 7a2caf9fb..9791feffc 100644
+--- a/src/com/android/camera/processing/imagebackend/TaskCompressImageToJpeg.java
++++ b/src/com/android/camera/processing/imagebackend/TaskCompressImageToJpeg.java
+@@ -182,8 +182,18 @@ public class TaskCompressImageToJpeg extends TaskJpegEncode {
+                     if (exifPixelXDimension == null || exifPixelYDimension == null) {
+                         Log.w(TAG,
+                                 "Cannot parse EXIF for image dimensions, passing 0x0 dimensions");
+-                        imageHeight = 0;
+-                        imageWidth = 0;
++                        /* mocha (09-11-2026): anunciar 0x0 dimensiones hacia que
++                         * guaranteedSafeCrop(0, 0, crop) devolviera Rect(0,0,0,0); entonces
++                         * requiresCropOperation(proxy, Rect(0,0,0,0)) da TRUE y
++                         * decompressCropAndRecompressJpegData() decodifica con Skia y vuelve a
++                         * codificar con Bitmap.compress: el JPEG que enviaba el HAL (nuestro
++                         * adapter, talla nativa) salia re-multiplexado (APP2 'ICC_PROFILE',
++                         * tablas DQT que no son las de libjpeg, 502776 -> 478571 bytes).
++                         * Si el EXIF no trae dimensiones, usamos las del ImageProxy: son las
++                         * del stream JPEG real, y asi el crop full-frame coincide y Camera2
++                         * toma la rama 'Pass-though the JPEG data'. */
++                        imageHeight = img.proxy.getHeight();
++                        imageWidth = img.proxy.getWidth();
+                         // calculate crop from exif info with image proxy width/height
+                         safeCrop = guaranteedSafeCrop(img.proxy,
+                                 rotateBoundingBox(img.crop, combinedRotationFromSensorToJpeg));
+@@ -203,7 +213,15 @@ public class TaskCompressImageToJpeg extends TaskJpegEncode {
+                             imageHeight,
+                             img.proxy.getFormat(), safeCrop);
+ 
+-                    if(requiresCropOperation(img.proxy, safeCrop)) {
++                    /* mocha (09-11-2026): si el recorte cubre toda la imagen decodificada NO
++                     * hay nada que recortar, y 'decompressCropAndRecompressJpegData' solo haria
++                     * decode(Skia) + Bitmap.compress(q) -> doble JPEG sobre un bitstream que ya
++                     * era correcto.  Con crop full-frame pasamos el JPEG del HAL tal cual.
++                     * (Si el recorte es de verdad parcial, se recorta como siempre.) */
++                    final boolean cropEsTodaLaImagen =
++                            safeCrop.width() >= imageWidth && safeCrop.height() >= imageHeight;
++
++                    if (requiresCropOperation(img.proxy, safeCrop) && !cropEsTodaLaImagen) {
+                         // Crop the image
+                         resultImage = new TaskImage(
+                                 exifDerivedRotation,
+@@ -220,6 +238,8 @@ public class TaskCompressImageToJpeg extends TaskJpegEncode {
+                         compressedData.rewind();
+                     } else {
+                         // Pass-though the JPEG data
++                        Log.i(TAG, "mocha: pass-through del JPEG del HAL (sin re-codificar): "
++                                + imageWidth + "x" + imageHeight + " crop=" + safeCrop);
+                         resultImage = inputImage;
+                     }
+                 } finally {
+diff --git a/src/com/android/camera/util/ExifUtil.java b/src/com/android/camera/util/ExifUtil.java
+index 18150a0c8..881f6742e 100644
+--- a/src/com/android/camera/util/ExifUtil.java
++++ b/src/com/android/camera/util/ExifUtil.java
+@@ -162,16 +162,26 @@ public class ExifUtil {
+         addExifTag(ExifInterface.TAG_FOCAL_LENGTH, rational(focalLength, FOCAL_LENGTH_PRECISION));
+ 
+         // Flash mode
++        // (W) mocha: 'flashMode' puede venir NULO si el HAL no publica FLASH_MODE (o si el
++        // framework entrega un resultado parcial).  La comparacion 'flashMode ==
++        // CaptureResult.FLASH_MODE_OFF' hace unboxing de un Integer nulo y mataba Camera2:
++        //   java.lang.NullPointerException: Attempt to invoke virtual method
++        //     'int java.lang.Integer.intValue()' on a null object reference
++        //     at com.android.camera.util.ExifUtil.addCaptureResultToExif(ExifUtil.java:166)
++        //     at com.android.camera.processing.imagebackend.TaskCompressImageToJpeg.run(:361)
++        // (medido 14-11-2026 22:18:47 'FATAL EXCEPTION: Thread-2', Process com.android.camera2
++        //  PID 2004 => la foto se perdio porque la app murio antes de guardarla ✗)
+         Integer flashMode = result.get(CaptureResult.FLASH_MODE);
+-        if (flashMode == CaptureResult.FLASH_MODE_OFF) {
++        if (flashMode == null || flashMode == CaptureResult.FLASH_MODE_OFF) {
+             addExifTag(ExifInterface.TAG_FLASH, ExifInterface.Flash.DID_NOT_FIRE);
+         } else {
+             addExifTag(ExifInterface.TAG_FLASH, ExifInterface.Flash.FIRED);
+         }
+ 
+         // White balance
++        // (W) idem: mismo unboxing peligroso una linea despues ✗
+         Integer whiteBalanceMode = result.get(CaptureResult.CONTROL_AWB_MODE);
+-        if (whiteBalanceMode == CaptureResult.CONTROL_AWB_MODE_OFF) {
++        if (whiteBalanceMode != null && whiteBalanceMode == CaptureResult.CONTROL_AWB_MODE_OFF) {
+             addExifTag(ExifInterface.TAG_WHITE_BALANCE, ExifInterface.WhiteBalance.MANUAL);
+         } else {
+             addExifTag(ExifInterface.TAG_WHITE_BALANCE, ExifInterface.WhiteBalance.AUTO);

@@ -1,4 +1,6 @@
-This is patch directory
+This is patch directory  (ESTO YA NO ES LA LISTA AUTORIZADA: la lista al dia, con el motivo
+de cada parche y el estado de la cadena, esta en README.md. Este fichero se conserva como
+referencia historica.)
 
 Layout: one subdirectory per repo (path relative to the tree root),
 numbered .patch files inside (git format, apply from the repo root).
@@ -25,9 +27,9 @@ Patches:
   hardware/interfaces/             Tegra camera session/provider/hwc2
   system/core/                     init zygote32 ld-preload shim, add_root
   system/extras/                   su from any uid
-  packages/apps/Camera2/           selfie preview NPE fallback (front cam
-                                   only advertises 4:3 previews), MediaStore
-                                   JPEG write (FUSE), picsize debug log
+  packages/apps/Camera2/           0001-camera2-cumulative-photo-path-resilience (10 ficheros,
+                                   git diff HEAD). El selfie-preview-NPE anterior esta en
+                                   Camera2.disabled/: su contenido se commiteo en 903b589a2
   packages/apps/Gallery2/          video debug logging
   hardware/nvidia/hwcomposer/      Tegra build fixes
   hardware/broadcom/wlan/          wifi_hal use-after-free guard
@@ -43,9 +45,11 @@ Patches:
    system/bt/                      LDAC codec unavailable
    vendor/lineage/                 soong generated_kernel_headers stub
 
-All patches above are committed in their respective repos (local
-commits on top of upstream); the .patch files here are the persistent
-record and the means to re-apply on a fresh tree.
+AFIRMACION CORREGIDA (2026-11-16): NO todos los cambios son commits locales.  Los repos
+  frameworks/av, frameworks/base, system/core, system/netd, bionic y packages/apps/Camera2
+  tienen ficheros MODIFICADOS SIN COMMITEAR; el unico modo de reconstruirlos desde un clone
+  limpio es la cadena de parches (install.sh).  verify.sh es quien lo comprueba: sembrar desde
+  BASE/HEAD, aplicar la cadena y comparar fichero a fichero.  Ver README.md.
 
 NOTE: changes to this repo itself (device/xiaomi/mocha, e.g.
 system_prop.mk) are normal commits, not patches, and are pushed to the

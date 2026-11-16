@@ -46,7 +46,8 @@ Broadcom). No borrar los comentarios: son el historial de por qué existe cada u
 | `hardware/interfaces` | `0001-camera-and-hwc2-changes`, `0002-preserve-tegra-gralloc-handle-references`, `0003-camera-provider-legacy-framework-binder`, `0004-allocator-passthrough-sanitize-usage` | HAL legacy Tegra (cámara, composer 2.1, allocator) |
 | `hardware/interfaces` | **`0005-camera-provider-rc-preload-mocha-abi-shims`** | A12 no consume `TARGET_LD_SHIM_LIBS` y `RTLD_GLOBAL` desde `camera.tegra.so` no llega a los blobs cargados por `android_load_sphal_library` (medido 2026-10-27/28): hay que poner `setenv LD_PRELOAD` de `libmocha_cpp_shim.so:libmocha_sensor_shim.so:libshim_atomic.so` **solo** en el servicio camera provider (exportarlo globalmente rompe los binarios APEX). Mismo commit ya aplicado en el repo `hardware/interfaces` (`9a23d2779`); este parche es el registro para reconstruir el árbol desde cero |
 | `frameworks/native` | **`0006-libui-120-byte-graphicbuffer-libbinder-48-byte-parcel-gui-surface-and-sf-shims`** | registro completo del commit local `2d0a6820be` (ABI de `GraphicBuffer`/`Parcel` que usan las blobs stock, shims de `Surface.cpp` y de `main_surfaceflinger.cpp`); genera ademas `libs/gui/Surface.cpp` y `services/surfaceflinger/main_surfaceflinger.cpp`, que no estaban cubiertos por `0002`/`0004`/`0005` |
-| `frameworks/av` | **`0001-camera-media-codec-audio-and-camera3-changes-cumulative`** | parche único = `git diff HEAD` sobre los 19 ficheros sucios reales (`camera/Android.bp`, `SoftwareRenderer.cpp`, codec2, nuplayer, audioflinger, `Camera3Device.cpp`…). Sustituye a `0004`/`0005`/`0006`, que **solapaban**: `0005` y `0006` no aplicaban después de `0004` y rompían la cadena |
+| `frameworks/av` | **`0001-camera-media-codec-audio-and-camera3-changes-cumulative`** | parche único = `git diff HEAD` sobre los **21** ficheros sucios reales (`camera/Android.bp`, `camera/VendorTagDescriptor.cpp`, `CameraProviderManager.cpp`, `SoftwareRenderer.cpp`, codec2, nuplayer, audioflinger, `Camera3Device.cpp`…). Sustituye a `0004`/`0005`/`0006`, que **solapaban**: `0005` y `0006` no aplicaban después de `0004` y rompían la cadena. **Regenerado 2026-11-16**: antes cubria 19 (dejaba fuera `VendorTagDescriptor.cpp` y `CameraProviderManager.cpp`, UNREG) y su hunk de `camera/Android.bp` no reproducia el árbol (RESIDUAL) |
+| `packages/apps/Camera2` | **`0001-camera2-cumulative-photo-path-resilience`** | **2026-11-16**: `git diff HEAD` sobre los 10 ficheros sucios (guardado tolerante sin EXIF, detección de módulo nulo, enumeración de cámaras legacy, `PhotoModule`/`CaptureModule` sin NPE, EXIF/compresión). Sustituye a `0001-selfie-preview-npe-fallback`, ahora en `Camera2.disabled/` |
 | `frameworks/base` | **`0001-mocha-framework-changes-cumulative`** | 17 ficheros: BiometricPrompt/PromptInfo, MmsManager/IMms.aidl/TelephonyPermissions/Telephony, Notifier, DisplayPowerController, CollapsedStatusBarFragment, WindowManagerService, TaskSnapshotPersister, config.xml/symbols.xml, hwui (EglManager, RenderThread, Typeface) y `KernelSingleProcessCpuThreadReader` |
 | `kernel/xiaomi/mocha` | **`0001-board-ardbeg-sensors-restore-camera-pdata-blobs`** | `of_camera_create_pdata()` (`drivers/media/platform/tegra/cam_dev/of_camera.c:476`) sólo pone `bi->platform_data` si el auxdata instala la tabla `camera_data_blob` cuyos `.name` coinciden con las claves `platformdata` del DT. Con el bloque en `#if 0` y el stub `{ {} }` los drivers `imx179`/`ov5693`/`ad5823` no poweronean y `misc_register()` nunca crea `/dev/imx179` ni `/dev/ov5693` -> 0 cámaras. Además CSIA/B/E no entran en DPD en tn8/mocha (el CSI es el camino de datos). Ver `plan_fixes_F8.md` §F9 |
 | `kernel/xiaomi/mocha` | **`0002-defconfig-disable-cgroup_debug-and-debug_vm`** | `CONFIG_CGROUP_DEBUG=y` y `CONFIG_DEBUG_VM=y` estaban activos en 2 GB de RAM (comprobaciones de VM y ficheros de depuración cgroup); Abobo7 17.1 los trae desactivados. `CONFIG_ANDROID_BINDER_IPC_32BIT` NO se toca: nuestro wire binder es de 64 bits y todo el HIDL/FD-passing funciona sobre él |
@@ -54,7 +55,7 @@ Broadcom). No borrar los comentarios: son el historial de por qué existe cada u
 
 | `kernel/xiaomi/mocha` | **`0004-plan-A-stock-tvc-camera-host`** | Plan A (HAL stock NVIDIA): el kernel pasa al modelo TVC/pcl -> `tegra124-mocha.dts` incluye el dtsi de cámara, se elimina el dtsi `tvc` duplicado y el defconfig activa el host TVC. Registro del commit `4d03d64aa6d` del repo del kernel |
 | `kernel/xiaomi/mocha` | **`0005-dts-point-camera-include-at-an-existing-dtsi`** | el include del dtsi de cámara apuntaba a un fichero que no existe en el árbol; el include debe apuntar al dtsi real. Registro del commit `43cebb30695` |
-| `frameworks/av` | **`0001-camera-media-codec-audio-and-camera3-changes-cumulative`** | ver tabla: parche cumulativo que sustituye a `0004`/`0005`/`0006` |
+| _`kernel/xiaomi/mocha` 0001..0005_ | _(cinco filas de arriba)_ | **ojo con estas cinco**: los cambios del kernel están **commiteados** en el repo `kernel/xiaomi/mocha`, así que esos cinco parches viven en `kernel/xiaomi/mocha.disabled/` y **no forman parte de la cadena aplicable**. Se listan aquí porque documentan el porqué (ver «Índice de estado global») |
 | `external/dng_sdk` | **`0001-remove-sdk_version-from-libdng_sdk`** | `sdk_version` en `libdng_sdk` obliga a una SDK de plataforma que no encaja con este tree; sin él la lib se construye con los headers del tree. Registro del commit `04a2068` |
 | `lineage-sdk` | **`0001-health-null-guard-when-HAL-absent`** | `isChargingModeSupported()` lanzaba NPE cuando el HAL de health no está (mocha no tiene HAL health propio). Registro del commit `b4f8a06d` |
 | `packages/apps/Settings` | **`0002-guard-null-Activity-in-SettingsPreferenceFragment`** | `hasNextButton()`/`getNextButton()` con Activity nula (prefs abiertos desde fuera del flujo de Setup) -> NPE. Registro del commit `ceaee0eefc` |
@@ -71,6 +72,27 @@ Broadcom). No borrar los comentarios: son el historial de por qué existe cada u
 > solapados y dos parches `0004`**, que `frameworks/native/0006` duplicaba contenido, que
 > `lmkd/0002` era un fichero **de 0 bytes** y que `bionic/libm` estaba registrado con el repo
 > equivocado. Todos corregidos: `BROKEN=0 RESIDUAL=0 UNREG=0` en los 24 repos.
+
+## Estado 2026-11-16 (Lote 1 del plan: T-01/T-02)
+
+`check.sh` daba `BROKEN=1 RESIDUAL=1 UNREG=11`; ahora da **`BROKEN=0 RESIDUAL=0 UNREG=0` en 24 repos / 34 parches**:
+
+- **`packages/apps/Camera2`**: `0001-selfie-preview-npe-fallback.patch` estaba **BROKEN** porque su
+  contenido ya está commiteado en el repo (`903b589a2 Camera2: no morir al guardar la foto (Bitmap
+  null del HAL Tegra)`, que tocó `Storage.java`, `VideoModule.java`, `PictureSizeCalculator.java`).
+  Movido a `packages/apps/Camera2.disabled/` y sustituido por
+  `0001-camera2-cumulative-photo-path-resilience.patch` = `git diff HEAD` sobre los **10** ficheros
+  sucios reales (los 9 que estaban UNREG + `Storage.java`).
+- **`frameworks/av`**: cumulativo regenerado con `git diff HEAD` (**21** ficheros). Cubre los 2 que
+  faltaban y reescribe el hunk de `camera/Android.bp` (el RESIDUAL), que es donde se declara la marca
+  de vendor tags que usa el wrapper del HAL.
+- Herramienta nueva: **`regenerate.sh <repo>`** (rehace el cumulativo desde `BASE` si el repo lo tiene,
+  o desde `HEAD`; se niega a colapsar cadenas de varios parches como `system/core`).
+- Puerta nueva: **`registry_gate.mk`**, incluido al final de `mocha.mk`. Añade el phony
+  `mocha-registry-check` como prerequisito de `droid` y `droid_targets` (los targets que usa
+  soong_ui), así que **ningún brunch de mocha arranca** si `check.sh` falla. `m <modulo>` no lo
+  ejecuta (job_module.sh lo lanza aparte y ya llama a `check.sh` antes de compilar, con
+  `SKIP_PATCH_CHECK=1` para saltarlo).
 
 ## Referencia cruzada
 
@@ -93,6 +115,8 @@ sh device/xiaomi/mocha/patches/check.sh     # puerta antes de compilar: verify +
 sh device/xiaomi/mocha/patches/install.sh   # aplica en orden numerico, idempotente
 sh device/xiaomi/mocha/patches/uninstall.sh # revierte parche a parche (orden inverso) y informa del resto
 sh device/xiaomi/mocha/patches/uninstall.sh --hard   # git checkout -- . && git clean -df (ojo: borra tambien lo no registrado)
+sh device/xiaomi/mocha/patches/regenerate.sh <repo>  # rehacer el cumulativo de un repo desde BASE/HEAD hasta el arbol actual
+sh device/xiaomi/mocha/patches/registry_gate.mk      # NO: es la puerta que mocha.mk include en el build
 ```
 
 Cómo demuestra `verify.sh` que el registro reproduce el árbol, por repo:
