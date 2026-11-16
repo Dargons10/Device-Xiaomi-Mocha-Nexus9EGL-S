@@ -25,17 +25,29 @@ patches_dir="$(cd "$(dirname "$0")" && pwd)"
 tree_root="$(cd "$patches_dir/../../../.." && pwd)"
 
 # Repos (rutas relativas al arbol) que tienen parches en el registro.
+#
+# OJO con la herramienta: dentro del build (`m`, `brunch`, job_module.sh) el `find` que se
+# usa NO es GNU findutils, es `prebuilts/build-tools/path/linux-x86/find` -> symlink a
+# `toybox 0.8.4-android`, y toybox no conoce `-printf '%h'`.  Medido el 2026-11-16:
+#     $ prebuilts/.../find . -mindepth 2 -name '*.patch' -printf '%h'
+#     find: bad -printf %h
+# Como el error se descartaba con 2>/dev/null, list_repos() devolvia NA DA y verify()/
+# check() informaban `cadenas OK=0 repos procesados=0 BROKEN=0 RESIDUAL=0 UNREG=0` y salian
+# con rc=0: una puerta verde que no comprobaba nada.  Desde aqui se saca el directorio con
+# sed (sintaxis POSIX, vale para GNU find y para toybox) y el error de find ya no se oculta.
 list_repos() {
-    ( cd "$patches_dir" && find . -mindepth 2 -name '*.patch' -printf '%h\n' 2>/dev/null ) \
-        | sed 's|^\./||' \
+    ( cd "$patches_dir" && find . -mindepth 2 -name '*.patch' 2>/dev/null ) \
+        | sed -e 's|^\./||' -e 's|/[^/]*\.patch$||' \
         | grep -vE '(^|/)[^/]*\.disabled(/|$)' \
         | sort -u
 }
 
 # Lo mismo pero SOLO los conjuntos desactivados, para informativos.
 list_disabled() {
-    ( cd "$patches_dir" && find . -mindepth 2 -name '*.patch' -printf '%h\n' 2>/dev/null ) \
-        | sed 's|^\./||' | grep -E '(^|/)[^/]*\.disabled(/|$)' | sort -u
+    ( cd "$patches_dir" && find . -mindepth 2 -name '*.patch' 2>/dev/null ) \
+        | sed -e 's|^\./||' -e 's|/[^/]*\.patch$||' \
+        | grep -E '(^|/)[^/]*\.disabled(/|$)' \
+        | sort -u
 }
 
 # Parches de un repo, en orden numerico (el orden importa: hay dependencias encadenadas).
