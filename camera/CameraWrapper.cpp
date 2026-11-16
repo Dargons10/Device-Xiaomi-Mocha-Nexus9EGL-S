@@ -1274,6 +1274,81 @@ static const struct {
  * 'fault addr 0x0' (130 crashes del provider registrados en sistema.log) y 'Number of camera
  * devices: 0'. Por eso esta etiqueta se siembra SIEMPRE.
  */
+/*
+ * Mandos del catalogo (2026-11-16). Sirven para MEDIR en el dispositivo, sin recompilar, dos
+ * datos que hasta hoy estaban fijos en kMochaCameras:
+ *   /data/local/tmp/mocha-sensor-max          con 'WxH'            -> maxima talla anunciada
+ *   /data/local/tmp/mocha-sensor-orientation  con 0/90/180/270     -> ANDROID_SENSOR_ORIENTATION
+ * Sin fichero el comportamiento es exactamente el de la tabla (cero riesgo sobre lo que ya funciona).
+ *
+ * Techo medido en el kernel: imx179.c define mode_3280x2460, mode_1920x1080 y mode_1280x720_90fps
+ * y imx179_set_mode() (lineas 435-443) solo acepta esos tres pares; cualquier otro par cae al
+ * 'Unknown mode' y configureStreams fracasa. ov5693.c tiene 2592x1944 y 1296x972. Por eso el knob
+ * se rechaza por encima de 3280x2460 (trasera) o 2592x1944 (frontal).
+ *
+ * Donde esta el 8 MP de la ficha comercial (3264x2448): buscando pares de enteros little-endian
+ * dentro de camera.vendor.tegra.so aparecen dos tablas distintas (medido sobre las tres versiones
+ * del blob en el historial, md5 identico en las tres):
+ *   0xfac34 : 2592x1944, 1920x1080, 1296x972, 1280x720, 640x480   -> modos del sensor, es la que
+ *                hoy reproduce kMochaCameras y la que el framework anuncia como maxima
+ *   0xfbd90 : 960x540 1440x1080 1600x1200 1920x1080 2048x1536 2104x1560 2688x1520 2592x1458
+ *             2592x1944 3264x1836 3264x2448 3896x2192 4128x3096 4208x2368 4208x3120
+ * El blob SI conoce 3264x2448 en esa segunda tabla; lo que le falta es llevarla a la primera.
+ * 3280x2460 (el modo real del driver) no aparece en ninguna de las dos.
+ */
+static bool mocha_knob_max_size(int camera_id, unsigned int *w, unsigned int *h)
+{
+    /* Solo la trasera: la frontal ya anuncia 2592x1944, que es el maximo real de ov5693.c. */
+    if (camera_id != 0)
+        return false;
+    FILE *f = fopen("/data/local/tmp/mocha-sensor-max", "r");
+    if (f == NULL)
+        return false;
+    char buf[32];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    if (n == 0)
+        return false;
+    unsigned int rw = 0, rh = 0;
+    if (sscanf(buf, "%u x %u", &rw, &rh) != 2 || rw == 0 || rh == 0) {
+        ALOGE("%s: knob mocha-sensor-max ilegible: '%s'", __FUNCTION__, buf);
+        return false;
+    }
+    const unsigned int lim_w = (camera_id == 0) ? 3280u : 2592u;
+    const unsigned int lim_h = (camera_id == 0) ? 2460u : 1944u;
+    if (rw > lim_w || rh > lim_h) {
+        ALOGE("%s: camara %d knob %ux%u superado: el driver del sensor llega hasta %ux%u", __FUNCTION__,
+              camera_id, rw, rh, lim_w, lim_h);
+        return false;
+    }
+    *w = rw;
+    *h = rh;
+    return true;
+}
+
+static bool mocha_knob_orientation(int camera_id, int32_t *out)
+{
+    /* Solo la trasera: la frontal publica 90 y esa si esta verificada (las selfies salen derechas). */
+    if (camera_id != 0)
+        return false;
+    FILE *f = fopen("/data/local/tmp/mocha-sensor-orientation", "r");
+    if (f == NULL)
+        return false;
+    char buf[16];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    if (n == 0)
+        return false;
+    long v = strtol(buf, NULL, 10);
+    if (v != 0 && v != 90 && v != 180 && v != 270) {
+        ALOGE("%s: knob mocha-sensor-orientation invalido: '%s' (valores validos 0/90/180/270)",
+              __FUNCTION__, buf);
+        return false;
+    }
+    *out = (int32_t)v;
+    return true;
+}
+
 static bool seed_static_metadata(camera_metadata_t **metadata_ptr, int camera_id)
 {
     if (camera_id < 0 || camera_id >= (int)(sizeof(kMochaCameras) / sizeof(kMochaCameras[0]))) {
@@ -1281,6 +1356,59 @@ static bool seed_static_metadata(camera_metadata_t **metadata_ptr, int camera_id
         return false;
     }
     const auto &cam = kMochaCameras[camera_id];
+
+    /*
+     * Copia local del catalogo: los mandos se aplican sobre esta copia, nunca sobre la tabla, de
+     * forma que sin knob las tallas anunciadas sigan siendo las de siempre. 'szs[0]' es la talla
+     * maxima y de ella salen activeArraySize, pixelArraySize, el rango de fps y JPEG_MAX_SIZE.
+     */
+    struct { unsigned int w, h; int fps; } szs[5];
+    int nsz = 0;
+    for (int i = 0; i < cam.nsizes && i < 4; i++) {
+        szs[i].w = cam.sizes[i].w;
+        szs[i].h = cam.sizes[i].h;
+        szs[i].fps = cam.sizes[i].fps;
+        nsz++;
+    }
+    int32_t orientation_local = cam.orientation;
+    bool knob_resized = false;
+    {
+        int32_t ko = 0;
+        if (mocha_knob_orientation(camera_id, &ko) && ko != cam.orientation) {
+            ALOGI("%s: camara %d orientacion anunciada por knob: %d (en la tabla: %d)", __FUNCTION__,
+                  camera_id, ko, cam.orientation);
+            orientation_local = ko;
+        }
+    }
+    {
+        unsigned int kw = 0, kh = 0;
+        if (mocha_knob_max_size(camera_id, &kw, &kh) && (kw != szs[0].w || kh != szs[0].h)) {
+            /* La nueva maxima pasa a szs[0]; se conservan las tres siguientes (el ISP escala
+             * desde el modo del sensor, y la app sigue ofreciendo sus tallas pequenas). */
+            if (nsz < 4) {
+                for (int i = nsz; i > 0; i--) {
+                    szs[i].w = szs[i - 1].w;
+                    szs[i].h = szs[i - 1].h;
+                    szs[i].fps = szs[i - 1].fps;
+                }
+                nsz++;
+            } else {
+                for (int i = nsz - 1; i > 0; i--) {
+                    szs[i].w = szs[i - 1].w;
+                    szs[i].h = szs[i - 1].h;
+                    szs[i].fps = szs[i - 1].fps;
+                }
+            }
+            szs[0].w = kw;
+            szs[0].h = kh;
+            szs[0].fps = ((float)kw * (float)kh > 1920.0f * 1080.0f) ? 15 : 30;
+            knob_resized = true;
+            ALOGI("%s: camara %d maxima talla anunciada %ux%u (antes %ux%u, %d fps): el HAL pedira "
+                  "ese par al driver del sensor", __FUNCTION__, camera_id, kw, kh, cam.sizes[0].w,
+                  cam.sizes[0].h, szs[0].fps);
+        }
+    }
+
     camera_metadata_t *md = *metadata_ptr;
     /*
      * Capacidad generosa: en esta version de libcamera_metadata add_camera_metadata_entry()
@@ -1316,7 +1444,7 @@ static bool seed_static_metadata(camera_metadata_t **metadata_ptr, int camera_id
      *   SCALER_AVAILABLE_PROCESSED_SIZES / REQUEST_AVAILABLE_CHARACTERISTICS_KEYS ... TYPE_INT32
      */
     uint8_t facing = (uint8_t)cam.facing;
-    int32_t orientation = cam.orientation;
+    int32_t orientation = orientation_local;
     uint8_t cfa = (uint8_t)cam.cfa;
     uint8_t nr_modes[] = { ANDROID_NOISE_REDUCTION_MODE_OFF, ANDROID_NOISE_REDUCTION_MODE_FAST,
                            ANDROID_NOISE_REDUCTION_MODE_HIGH_QUALITY };
@@ -1336,15 +1464,15 @@ static bool seed_static_metadata(camera_metadata_t **metadata_ptr, int camera_id
      */
     uint8_t vstab_modes[] = { ANDROID_CONTROL_VIDEO_STABILIZATION_MODE_OFF };
     uint8_t scene_modes[] = { (uint8_t)ANDROID_CONTROL_SCENE_MODE_DISABLED };
-    int32_t active[] = { 0, 0, (int32_t)cam.sizes[0].w, (int32_t)cam.sizes[0].h };
+    int32_t active[] = { 0, 0, (int32_t)szs[0].w, (int32_t)szs[0].h };
     /*
      * pixelArraySize es UNA PAREJA (width, height); activeArraySize son CUATRO valores
      * (x, y, width, height). Compartir el array de 4 haria que cualquier lector interprete
      * pixelArraySize como 0x0 (cero tallas disponibles -> el mismo tipo de fallo
      * 'length=0; index=0' que muestra el log de la app de camara).
      */
-    int32_t pix_array[] = { (int32_t)cam.sizes[0].w, (int32_t)cam.sizes[0].h };
-    int32_t fps_min[] = { 1, cam.sizes[0].fps };
+    int32_t pix_array[] = { (int32_t)szs[0].w, (int32_t)szs[0].h };
+    int32_t fps_min[] = { 1, szs[0].fps };
     int32_t ae_comp[] = { 0, 0 };
     uint8_t caps[] = { (uint8_t)ANDROID_REQUEST_AVAILABLE_CAPABILITIES_BACKWARD_COMPATIBLE };
     int64_t exp_range[] = { 1000000LL, 30000000000LL };
@@ -1386,7 +1514,21 @@ static bool seed_static_metadata(camera_metadata_t **metadata_ptr, int camera_id
     float filter_densities[] = { 0.0f };              /* sin filtro ND neutro */
     float hyperfocal[] = { 0.0f };                    /* sin calibracion de enfoque */
     float min_focus_distance[] = { 0.0f };            /* idem */
+    /*
+     * sensor.info.physicalSize debe corresponder al array anunciado (los FOV se calculan con
+     * ancho/focal sobre esa dimension). Si el knob cambia la talla, se recalcula con el mismo
+     * paso de pixel implicito de la tabla (phys * 1000 / px), para no dejar optica y array
+     * incoherentes. Sin knob, los valores literales de la tabla, sin tocar.
+     */
     float phys_size[] = { cam.phys_w_mm, cam.phys_h_mm };
+    if (knob_resized) {
+        float pitch_w_mm = cam.phys_w_mm * 1000.0f / (float)cam.sizes[0].w;
+        float pitch_h_mm = cam.phys_h_mm * 1000.0f / (float)cam.sizes[0].h;
+        phys_size[0] = (float)szs[0].w * pitch_w_mm / 1000.0f;
+        phys_size[1] = (float)szs[0].h * pitch_h_mm / 1000.0f;
+        ALOGI("%s: camara %d physicalSize recalculado a %.2f x %.2f mm (paso %.3f um) por el knob",
+              __FUNCTION__, camera_id, phys_size[0], phys_size[1], pitch_w_mm);
+    }
     float max_digital_zoom = 2.0f;
     uint8_t optical_stab[] = { ANDROID_LENS_OPTICAL_STABILIZATION_MODE_OFF };
     /* Ojo: los valores de lens.info.availableOpticalStabilization usan el enum
@@ -1558,11 +1700,11 @@ static bool seed_static_metadata(camera_metadata_t **metadata_ptr, int camera_id
      */
     int32_t psizes[16]; int np = 0;
     int32_t jsizes[16]; int nj = 0;
-    for (int i = 0; i < cam.nsizes; i++) {
-        psizes[np++] = (int32_t)cam.sizes[i].w;
-        psizes[np++] = (int32_t)cam.sizes[i].h;
-        jsizes[nj++] = (int32_t)cam.sizes[i].w;
-        jsizes[nj++] = (int32_t)cam.sizes[i].h;
+    for (int i = 0; i < nsz; i++) {
+        psizes[np++] = (int32_t)szs[i].w;
+        psizes[np++] = (int32_t)szs[i].h;
+        jsizes[nj++] = (int32_t)szs[i].w;
+        jsizes[nj++] = (int32_t)szs[i].h;
     }
     ok = upsert_metadata_entry(&md, ANDROID_SCALER_AVAILABLE_PROCESSED_SIZES, psizes, np, camera_id, -1) && ok;
     ok = upsert_metadata_entry(&md, ANDROID_SCALER_AVAILABLE_JPEG_SIZES, jsizes, nj, camera_id, -1) && ok;
@@ -1586,7 +1728,7 @@ static bool seed_static_metadata(camera_metadata_t **metadata_ptr, int camera_id
      * Usamos 2 bytes/pixel, margen holgado para JPEG de maxima calidad:
      *   imx179 1920x1080 -> 4.147.200 B   |   ov5693 2592x1944 -> 10.077.696 B
      */
-    int32_t jpeg_max_size = (int32_t)cam.sizes[0].w * (int32_t)cam.sizes[0].h * 2;
+    int32_t jpeg_max_size = (int32_t)szs[0].w * (int32_t)szs[0].h * 2;
     /* Mismo suelo que force_jpeg_max_size: si no lo aplicamos aqui, el framework asigna un
      * buffer de w*h*2 y el codificador del blob escribe su trailer fuera (K-45). */
     {
@@ -1605,7 +1747,7 @@ static bool seed_static_metadata(camera_metadata_t **metadata_ptr, int camera_id
 
     *metadata_ptr = md;
     ALOGI("%s: camara %d sembrada (%s): facing=%d orientacion=%d max=%ux%u %d tamano(s) - incluye CONTROL_AVAILABLE_SCENE_MODES",
-          __FUNCTION__, camera_id, cam.name, facing, orientation, cam.sizes[0].w, cam.sizes[0].h, cam.nsizes);
+          __FUNCTION__, camera_id, cam.name, facing, orientation, szs[0].w, szs[0].h, nsz);
     return ok;
 }
 
