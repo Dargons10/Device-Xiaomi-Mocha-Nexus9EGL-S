@@ -26,6 +26,7 @@
 #include <string.h>
 #include <time.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #include "CameraWrapper.h"
 #include "Camera3Wrapper.h"
@@ -550,6 +551,27 @@ static bool ensure_stream_configurations(camera_metadata_t** metadata_ptr, int c
  * Formula: 2 bytes/pixel sobre la mayor talla de captura, suelo 1 MiB, techo 64 MiB.
  *   imx179 1920x1080  -> 4.147.200 B    |    ov5693 2592x1944 -> 10.077.696 B
  */
+/* Lee el suelo del buffer JPEG.  Mismo mecanismo que los otros knobs de medicion de esta
+ * capa (el shim usa /data/local/tmp/mocha-syncfd-mode): un fichero con un numero; si no
+ * existe, se usa 'def'.  Escribir 0 en el fichero = comportamiento antiguo (w*h*2). */
+static int32_t mocha_jpeg_max_size_floor(int32_t def)
+{
+    FILE* f = fopen("/data/local/tmp/mocha-jpeg-maxsize", "r");
+    if (f == NULL)
+        return def;
+    char buf[32];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    if (n == 0)
+        return def;
+    long v = strtol(buf, NULL, 10);
+    if (v < 0)
+        v = 0;
+    if (v > 64 * 1024 * 1024)
+        v = 64 * 1024 * 1024;
+    return (int32_t)v;
+}
+
 static bool force_jpeg_max_size(camera_metadata_t** metadata_ptr, int camera_id)
 {
     camera_metadata_t* metadata = *metadata_ptr;
@@ -559,9 +581,36 @@ static bool force_jpeg_max_size(camera_metadata_t** metadata_ptr, int camera_id)
 
     static const int32_t kMinJpegBuf = 256 * 1024 + 8;   /* camera_jpeg_blob_t: 2 x uint32 */
 
+    /* SUELO del buffer JPEG (medido 2026-11-16, K-45).  El HAL stock lleva el literal
+     * 9.999.992 (= 10.000.000 - 8) una vez y 10.000.000 tres veces: escaneando el blob con
+     * enteros little-endian,
+     *   proprietary/lib/hw/camera.vendor.tegra.so -> {10000000: 3, 9999992: 1, 10485760: 2,
+     *                                                  10077696: 2}
+     * o sea el codificador escribe un atom de 8 bytes (camera_jpeg_blob_t: el trailer que
+     * AndroidMediaUtils necesita para saber cuanto JPEG hay) al final de un buffer que EL
+     * supone de 10.000.000 bytes.  El framework reserva exactamente ANDROID_JPEG_MAX_SIZE para
+     * la mayor talla JPEG (Camera3Device.cpp:1456-1466 + getJpegBufferSize:633-656), y aqui
+     * publicabamos w*h*2 = 4.147.200 para imx179 1920x1080; el write del blob cae fuera del
+     * handle -> 'nvmap ... h_offs >= h->size (offs=9999992, size=4149248)' -> -EINVAL ->
+     * 'NVMAP_IOC_WRITE failed' -> 'doJpegEncoding -- (error 0x6)' -> 'Not a valid jpeg image'.
+     * El knob deja medir A/B sin recompilar: /data/local/tmp/mocha-jpeg-maxsize con un numero
+     * (0 = comportamiento antiguo w*h*2).  Si el fichero no existe, se aplica el suelo.
+     */
+    static const int32_t kFloorDefault = 10 * 1000 * 1000;   /* el 10.000.000 del blob */
+    int32_t floor_b = mocha_jpeg_max_size_floor(kFloorDefault);
+
     camera_metadata_entry_t existing;
     if (find_camera_metadata_entry(metadata, ANDROID_JPEG_MAX_SIZE, &existing) == 0) {
         if (existing.count >= 1 && existing.data.i32[0] > kMinJpegBuf) {
+            if (floor_b > 0 && existing.data.i32[0] < floor_b) {
+                ALOGI("%s: camera %d JPEG_MAX_SIZE subido de %d a %d B: el HAL stock escribe su "
+                      "trailer de 8 bytes en 10.000.000-8 y el framework asigna exactamente "
+                      "este valor (suelo=%d; knob /data/local/tmp/mocha-jpeg-maxsize)",
+                      __FUNCTION__, camera_id, existing.data.i32[0], floor_b, floor_b);
+                int32_t raised = floor_b;
+                return upsert_metadata_entry(metadata_ptr, ANDROID_JPEG_MAX_SIZE, &raised, 1,
+                                             camera_id, (ssize_t)existing.index);
+            }
             ALOGI("%s: camera %d JPEG_MAX_SIZE ya valido en el blob: %d",
                   __FUNCTION__, camera_id, existing.data.i32[0]);
             return true;
@@ -602,10 +651,12 @@ static bool force_jpeg_max_size(camera_metadata_t** metadata_ptr, int camera_id)
     int64_t calc = (int64_t)best_w * (int64_t)best_h * 2;
     if (calc < 1024 * 1024) calc = 1024 * 1024;
     if (calc > 64LL * 1024 * 1024) calc = 64LL * 1024 * 1024;
+    if (floor_b > 0 && calc < floor_b)
+        calc = floor_b;
     int32_t jpeg_max_size = (int32_t)calc;
 
-    ALOGI("%s: camera %d JPEG_MAX_SIZE fijado en %d B (mayor talla %dx%d)",
-          __FUNCTION__, camera_id, jpeg_max_size, best_w, best_h);
+    ALOGI("%s: camera %d JPEG_MAX_SIZE fijado en %d B (mayor talla %dx%d, suelo %d)",
+          __FUNCTION__, camera_id, jpeg_max_size, best_w, best_h, floor_b);
 
     /* Reutilizamos el indice existente si el blob del HAL la traia pero era pequena */
     return upsert_metadata_entry(metadata_ptr, ANDROID_JPEG_MAX_SIZE, &jpeg_max_size, 1,
@@ -1536,6 +1587,17 @@ static bool seed_static_metadata(camera_metadata_t **metadata_ptr, int camera_id
      *   imx179 1920x1080 -> 4.147.200 B   |   ov5693 2592x1944 -> 10.077.696 B
      */
     int32_t jpeg_max_size = (int32_t)cam.sizes[0].w * (int32_t)cam.sizes[0].h * 2;
+    /* Mismo suelo que force_jpeg_max_size: si no lo aplicamos aqui, el framework asigna un
+     * buffer de w*h*2 y el codificador del blob escribe su trailer fuera (K-45). */
+    {
+        int32_t floor_b = mocha_jpeg_max_size_floor(10 * 1000 * 1000);
+        if (floor_b > jpeg_max_size) {
+            ALOGI("%s: camara %d JPEG_MAX_SIZE sembrada: %d -> %d B (w*h*2 era demasiado "
+                  "corto para el codificador del blob)", __FUNCTION__, camera_id,
+                  jpeg_max_size, floor_b);
+            jpeg_max_size = floor_b;
+        }
+    }
     ok = upsert_metadata_entry(&md, ANDROID_JPEG_MAX_SIZE, &jpeg_max_size, 1, camera_id, -1) && ok;
 
     ok = upsert_metadata_entry(&md, ANDROID_REQUEST_AVAILABLE_CHARACTERISTICS_KEYS,
