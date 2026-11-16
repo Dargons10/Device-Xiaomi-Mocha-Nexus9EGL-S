@@ -1,18 +1,23 @@
-# Camera2: cumulative changes for the Tegra stock camera path (Plan A, HAL 3.0 de 2015)
-#
-# Por que: la captura still del blob no entrega un JPEG valido hasta que el encoder nativo
-#   funcione (ver AUDITORIA K-15/K-31/K-36). Estos cambios hacen que la app sobreviva a ese
-#   fallo y no pierda la sesion: guardado tolerante sin EXIF, deteccion de modulo nulo,
-#   manager de camaras legacy tolerante, y manejo de PhotoModule/CaptureModule sin NPE.
-# Generado con: git -C packages/apps/Camera2 diff HEAD   (10 ficheros), 2026-11-16.
-# Estado anterior sustituto: ../Camera2.disabled/0001-selfie-preview-npe-fallback.patch
-#   (su contenido ya esta commiteado en 903b589a2 y por eso marcaba BROKEN).
-#
 diff --git a/src/com/android/camera/CameraActivity.java b/src/com/android/camera/CameraActivity.java
-index 5d7b7bb5d..3db2d63d9 100644
+index 3c676cba7..3db2d63d9 100644
 --- a/src/com/android/camera/CameraActivity.java
 +++ b/src/com/android/camera/CameraActivity.java
-@@ -1438,6 +1438,54 @@ public class CameraActivity extends QuickActivity
+@@ -1239,6 +1239,14 @@ public class CameraActivity extends QuickActivity
+             return;
+         }
+ 
++        /* mocha: el thumbnail que llega del HAL Tegra stock puede ser null
++         * (JPEG invalido) y CameraAppUI/RoundedThumbnailView petaban con NPE
++         * en el hilo principal al guardar la foto. */
++        if (indicator == null) {
++            Log.w(TAG, "indicateCapture: thumbnail nulo, se omite la miniatura");
++            return;
++        }
++
+         // Don't show capture indicator in Photo Sphere.
+         // TODO: Don't reach into resources to figure out the current mode.
+         final int photosphereModuleId = getApplicationContext().getResources().getInteger(
+@@ -1430,6 +1438,54 @@ public class CameraActivity extends QuickActivity
                  }
              };
  
@@ -67,7 +72,7 @@ index 5d7b7bb5d..3db2d63d9 100644
      @Override
      public void onNewIntentTasks(Intent intent) {
          onModeSelected(getModeIndex());
-@@ -1456,7 +1504,8 @@ public class CameraActivity extends QuickActivity
+@@ -1448,7 +1504,8 @@ public class CameraActivity extends QuickActivity
          mSoundPlayer = new SoundPlayer(mAppContext);
          mFeatureConfig = OneCameraFeatureConfigCreator.createDefault(getContentResolver(),
                  getServices().getMemoryManager());
@@ -346,7 +351,7 @@ index 7f42aaac7..166ac5d08 100644
          exif.setTagValue(ExifInterface.TAG_PIXEL_X_DIMENSION, new Integer(newWidth));
          exif.setTagValue(ExifInterface.TAG_PIXEL_Y_DIMENSION, new Integer(newHeight));
 diff --git a/src/com/android/camera/Storage.java b/src/com/android/camera/Storage.java
-index c1d15af00..aac20cdeb 100644
+index bc8d1bcfa..aac20cdeb 100644
 --- a/src/com/android/camera/Storage.java
 +++ b/src/com/android/camera/Storage.java
 @@ -131,11 +131,56 @@ public class Storage {
@@ -474,6 +479,121 @@ index c1d15af00..aac20cdeb 100644
      }
  
      private Uri generateUniquePlaceholderUri() {
+@@ -343,15 +442,23 @@ public class Storage {
+     private boolean createDirectoryIfNeeded(String filePath) {
+         File parentFile = new File(filePath).getParentFile();
+ 
+-        // If the parent exists, return 'true' if it is a directory. If it's a
+-        // file, return 'false'.
+-        if (parentFile.exists()) {
+-            return parentFile.isDirectory();
++        // The FUSE layer does not grant the camera app stat()/exists()/
++        // isDirectory()/mkdirs() access to /storage/emulated/0 or DCIM/Camera,
++        // so the checks below are false negatives even though the directory
++        // exists. Try to create it (best effort) but do not let a failed stat
++        // block the actual write, which goes through open(O_CREAT) /
++        // MediaProvider.
++        if (parentFile == null) {
++            return true;
+         }
+-
+-        // If the parent does not exists, attempt to create it and return
+-        // whether creating it succeeded.
+-        return parentFile.mkdirs();
++        boolean exists = parentFile.exists();
++        boolean isDir = exists && parentFile.isDirectory();
++        boolean created = !exists && parentFile.mkdirs();
++        Log.d(TAG, "createDirectoryIfNeeded: " + parentFile.getAbsolutePath()
++                + " exists=" + exists + " isDir=" + isDir + " created=" + created);
++        // The parent directory is known to exist on this device; allow the
++        // write to proceed regardless of the FUSE-broken stat results.
++        return true;
+     }
+ 
+     /** Updates the image values in MediaStore. */
+@@ -459,20 +566,12 @@ public class Storage {
+             return UNAVAILABLE;
+         }
+ 
+-        File dir = new File(DIRECTORY);
+-        dir.mkdirs();
+-        if (!dir.isDirectory() || !dir.canWrite()) {
+-            Log.d(TAG, DIRECTORY + " mounted, but isn't directory or cannot write");
+-            return UNAVAILABLE;
+-        }
+-
+-        try {
+-            StatFs stat = new StatFs(DIRECTORY);
+-            return stat.getAvailableBlocks() * (long) stat.getBlockSize();
+-        } catch (Exception e) {
+-            Log.i(TAG, "Fail to access external storage", e);
+-        }
+-        return UNKNOWN_SIZE;
++        // The FUSE layer does not grant the camera app stat()/StatFs access
++        // to /storage/emulated/0 or DCIM/Camera. Photos are saved via
++        // MediaProvider (MediaStore), not via direct file creation.
++        // Return a large value to bypass the storage check.
++        Log.d(TAG, "getAvailableSpace: returning large value (FUSE workaround)");
++        return 10L * 1024 * 1024 * 1024; // 10 GB
+     }
+ 
+     /**
+diff --git a/src/com/android/camera/VideoModule.java b/src/com/android/camera/VideoModule.java
+index abbae5265..eefab4df3 100644
+--- a/src/com/android/camera/VideoModule.java
++++ b/src/com/android/camera/VideoModule.java
+@@ -814,6 +814,16 @@ public class VideoModule extends CameraModule
+         final int previewScreenShortSide = (previewScreenSize.x < previewScreenSize.y ?
+                 previewScreenSize.x : previewScreenSize.y);
+         List<Size> sizes = Size.convert(capabilities.getSupportedPreviewSizes());
++        // Largest supported preview size, kept as a fallback in case the filter
++        // below removes every entry (e.g. a HAL that advertises a single
++        // preview size).
++        Size largestPreviewSize = null;
++        for (Size s : sizes) {
++            if (largestPreviewSize == null
++                    || s.width() * s.height() > largestPreviewSize.width() * largestPreviewSize.height()) {
++                largestPreviewSize = s;
++            }
++        }
+         Size preferred = new Size(capabilities.getPreferredPreviewSizeForVideo());
+         final int preferredPreviewSizeShortSide = (preferred.width() < preferred.height() ?
+                 preferred.width() : preferred.height());
+@@ -844,6 +854,16 @@ public class VideoModule extends CameraModule
+ 
+         Size optimalSize = CameraUtil.getOptimalPreviewSize(sizes,
+                 (double) profile.videoFrameWidth / profile.videoFrameHeight, context);
++        if (optimalSize == null) {
++            // No preview size survived the filter (e.g. the HAL advertises a
++            // single preview size that is smaller than the preferred size for
++            // video). Fall back to the largest supported preview size instead
++            // of crashing.
++            optimalSize = largestPreviewSize;
++        }
++        if (optimalSize == null) {
++            optimalSize = new Size(profile.videoFrameWidth, profile.videoFrameHeight);
++        }
+         return new Point(optimalSize.width(), optimalSize.height());
+     }
+ 
+diff --git a/src/com/android/camera/app/CameraAppUI.java b/src/com/android/camera/app/CameraAppUI.java
+index 94bb69f09..b54fce3f5 100644
+--- a/src/com/android/camera/app/CameraAppUI.java
++++ b/src/com/android/camera/app/CameraAppUI.java
+@@ -1619,6 +1619,13 @@ public class CameraAppUI implements ModeListView.ModeSwitchListener,
+         if (mSuppressCaptureIndicator || mFilmstripLayout.getVisibility() == View.VISIBLE) {
+             return;
+         }
++        /* mocha: el thumbnail del HAL Tegra stock puede ser null (JPEG no
++         * decodificable); RoundedThumbnailView petaba con NPE en el hilo
++         * principal al guardar la foto. */
++        if (thumbnailBitmap == null) {
++            Log.w(TAG, "updateCaptureIndicatorThumbnail: bitmap nulo, se omite");
++            return;
++        }
+         mRoundedThumbnailView.setThumbnail(thumbnailBitmap, rotation);
+     }
+ 
 diff --git a/src/com/android/camera/module/ModulesInfo.java b/src/com/android/camera/module/ModulesInfo.java
 index 87090ae25..55deb76aa 100644
 --- a/src/com/android/camera/module/ModulesInfo.java
@@ -540,6 +660,20 @@ index d1e0b5b8d..07f66f691 100644
          }
          return null;
      }
+diff --git a/src/com/android/camera/one/v2/common/PictureSizeCalculator.java b/src/com/android/camera/one/v2/common/PictureSizeCalculator.java
+index 8f2fb6a89..4889fbd36 100644
+--- a/src/com/android/camera/one/v2/common/PictureSizeCalculator.java
++++ b/src/com/android/camera/one/v2/common/PictureSizeCalculator.java
+@@ -153,6 +153,9 @@ public final class PictureSizeCalculator {
+         }
+         Size size = getSmallestSupportedSizeContainingTarget(supportedPictureSizes, targetSize);
+         Rect cropRegion = getPostCrop(AspectRatio.of(targetSize), size);
++        android.util.Log.i("MOCHA_PICSIZE", "computeConfiguration: format=" + imageFormat
++                + " target=" + targetSize + " actual=" + size + " crop=" + cropRegion
++                + " supported=" + supportedPictureSizes);
+         return new Configuration(size, cropRegion);
+     }
+ 
 diff --git a/src/com/android/camera/processing/imagebackend/TaskCompressImageToJpeg.java b/src/com/android/camera/processing/imagebackend/TaskCompressImageToJpeg.java
 index 7a2caf9fb..9791feffc 100644
 --- a/src/com/android/camera/processing/imagebackend/TaskCompressImageToJpeg.java
@@ -591,6 +725,55 @@ index 7a2caf9fb..9791feffc 100644
                          resultImage = inputImage;
                      }
                  } finally {
+diff --git a/src/com/android/camera/processing/imagebackend/TaskJpegEncode.java b/src/com/android/camera/processing/imagebackend/TaskJpegEncode.java
+index b1f1fbf19..1a3f72139 100644
+--- a/src/com/android/camera/processing/imagebackend/TaskJpegEncode.java
++++ b/src/com/android/camera/processing/imagebackend/TaskJpegEncode.java
+@@ -190,8 +190,42 @@ public abstract class TaskJpegEncode extends TaskImageContainer {
+             int recompressionQuality) {
+         Bitmap original = BitmapFactory.decodeByteArray(jpegData, 0, jpegData.length);
+ 
+-        final Bitmap croppedResult = Bitmap.createBitmap(original, crop.left, crop.top,
+-                crop.width(), crop.height());;
++        /* mocha: con el HAL Tegra stock el JPEG final puede llegar truncado o
++         * invalido (decodeByteArray -> null), y si el EXIF no trae dimensiones
++         * se calculan crops 0x0. Eso producía
++         *   FATAL EXCEPTION: Thread-2
++         *   java.lang.NullPointerException: ... Bitmap.getWidth() on null
++         *   TaskJpegEncode.decompressCropAndRecompressJpegData:193
++         * y la app de cámara moría al guardar la foto. Si algo falla aqui se
++         * devuelve el JPEG original sin recortar en lugar de petar el hilo.
++         */
++        if (original == null) {
++            Log.e(TAG, "decompressCropAndRecompressJpegData: JPEG no decodificable ("
++                    + (jpegData == null ? 0 : jpegData.length)
++                    + " bytes), se guarda sin recortar");
++            return jpegData;
++        }
++        final int left = Math.max(0, Math.min(crop.left, original.getWidth() - 1));
++        final int top = Math.max(0, Math.min(crop.top, original.getHeight() - 1));
++        final int width = Math.max(1,
++                Math.min(crop.width(), original.getWidth() - left));
++        final int height = Math.max(1,
++                Math.min(crop.height(), original.getHeight() - top));
++
++        Bitmap croppedResult;
++        try {
++            croppedResult = Bitmap.createBitmap(original, left, top, width, height);
++        } catch (IllegalArgumentException e) {
++            Log.e(TAG, "decompressCropAndRecompressJpegData: crop invalido " + crop
++                    + " sobre " + original.getWidth() + "x" + original.getHeight()
++                    + ", se guarda sin recortar", e);
++            return jpegData;
++        }
++        if (croppedResult == null) {
++            Log.e(TAG, "decompressCropAndRecompressJpegData: createBitmap devolvio null"
++                    + ", se guarda sin recortar");
++            return jpegData;
++        }
+ 
+         ByteArrayOutputStream stream = new ByteArrayOutputStream();
+ 
 diff --git a/src/com/android/camera/util/ExifUtil.java b/src/com/android/camera/util/ExifUtil.java
 index 18150a0c8..881f6742e 100644
 --- a/src/com/android/camera/util/ExifUtil.java
@@ -624,3 +807,22 @@ index 18150a0c8..881f6742e 100644
              addExifTag(ExifInterface.TAG_WHITE_BALANCE, ExifInterface.WhiteBalance.MANUAL);
          } else {
              addExifTag(ExifInterface.TAG_WHITE_BALANCE, ExifInterface.WhiteBalance.AUTO);
+diff --git a/src/com/android/camera/widget/RoundedThumbnailView.java b/src/com/android/camera/widget/RoundedThumbnailView.java
+index 07c571340..922cf89df 100644
+--- a/src/com/android/camera/widget/RoundedThumbnailView.java
++++ b/src/com/android/camera/widget/RoundedThumbnailView.java
+@@ -724,6 +724,14 @@ public class RoundedThumbnailView extends View {
+          */
+         public void setThumbnailBitmap(Bitmap thumbnailBitmap, int rotation) {
+             Bitmap originalBitmap = thumbnailBitmap;
++            /* mocha: el HAL Tegra stock puede entregar un thumbnail JPEG no
++             * decodificable -> BitmapFactory.decodeByteArray devuelve null y
++             * aquí se producía NPE (FATAL EXCEPTION: main) que mataba la app
++             * al guardar la foto. */
++            if (originalBitmap == null) {
++                Log.e(TAG, "setThumbnailBitmap: bitmap nulo (thumbnail invalido)");
++                return;
++            }
+             // Crop the image if it is not square.
+             if (originalBitmap.getWidth() != originalBitmap.getHeight()) {
+                 originalBitmap = cropCenterBitmap(originalBitmap);
