@@ -644,9 +644,17 @@ static int fdKind(int fd) {
         return 2;
     }
     name[n] = '\0';
-    gFdKind[fd] = strstr(name, "nvhost") ? 1 : 2;
+    if (strstr(name, "nvhost")) {
+        gFdKind[fd] = 1;
+    } else if (strstr(name, "nvmap")) {
+        /* /dev/nvmap: el codificador JPEG del blob llama a NVMAP_IOC_WRITE ahi, y es
+         * justo donde sale 'NVMAP_IOC_WRITE failed: Invalid argument'. */
+        gFdKind[fd] = 3;
+    } else {
+        gFdKind[fd] = 2;
+    }
     snprintf(gFdName[fd], sizeof(gFdName[fd]), "%s", name);
-    if (gFdKind[fd] == 1 && gIoctlLogged < 40u)
+    if ((gFdKind[fd] == 1 || gFdKind[fd] == 3) && gIoctlLogged < 40u)
         __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
                             "fd %d es %s -> se trazan sus ioctl", fd, name);
     return gFdKind[fd];
@@ -1314,6 +1322,151 @@ extern "C" int NvOsFprintf(void* hFile, const char* fmt, ...) {
     return 0;
 }
 
+/* ---- trazador de ioctls nvmap (magic 'N'), observacion pura ----------------------
+ * Por que hace falta aqui: la foto muere dentro del codificador JPEG del blob y lo unico
+ * que el blob dice es, literalmente (camera.log 26784-26791, sesion 2026-11-15 20:35:26):
+ *     Encoder_Open ++
+ *     Encoder_Close ++
+ *     NVMAP_IOC_WRITE failed: Invalid argument        (2 veces)
+ *     NvCameraHal3JpegProcessor: doJpegEncoding -- (error 0x6)
+ * 'Invalid argument' es -EINVAL.  En este kernel NVMAP_IOC_WRITE/READ van a
+ * nvmap_ioctl_rw_handle() (drivers/video/tegra/nvmap/nvmap_ioctl.c:514) y solo pueden dar
+ * -EINVAL en cuatro sitios:
+ *   b) !op.addr || !op.count || !op.elem_size                                   (:545)
+ *   c) unmarshal_user_handle(op.handle) == 0, o sea que el 'handle' que manda el blob
+ *      NO es un fd de dmabuf.  En este arbol unmarshal_user_handle() (nvmap_ioctl.c:53)
+ *      se limita a nvmap_get_id_from_dmabuf_fd(); el decodificador historico de handles
+ *      de nvmap ya no existe                                            (:549)
+ *   d) rw_handle() (nvmap_ioctl.c:1012): elem_size>h->size, h_offs>=h->size,
+ *      elem_size>sys_stride, elem_size>h_stride,
+ *      sys_stride>(h->size-h_offs)/count, h_stride>(h->size-h_offs)/count (:1024-1042)
+ * Este trazador comprueba (b) y (c) desde fuera y saca a la luz la geometria que el blob
+ * pidio en (d).  NO cambia nada: observa despues de que la llamada real haya terminado.
+ * El tamano real de h->size lo imprime el propio kernel con un pr_warn acotado en esas
+ * mismas clausulas: leerlo desde aqui exigiria lseek(SEEK_END) sobre el fd de dmabuf del
+ * blob, y moverle la posicion a SU fd si cambiaria su comportamiento.
+ */
+namespace {
+
+constexpr unsigned kNvmapMagic = 'N';
+
+/* include/linux/nvmap.h:180 y :191.  En el provider de 32 bits 'unsigned long addr'
+ * mide 4, asi que nvmap_rw_handle y nvmap_rw_handle_32 quedan identicos. */
+struct NvmapRw {
+    uint32_t addr, handle, offset, elem_size, hmem_stride, user_stride, count;
+};
+struct NvmapCache {
+    uint32_t addr, handle, len;
+    int32_t op;
+};
+
+struct NvmapNr { unsigned nr; const char* name; };
+const NvmapNr kNvmapNrs[] = {
+    {0, "CREATE"},       {2, "FROM_ID"},      {3, "ALLOC"},
+    {4, "FREE"},         {5, "MMAP_32"},      {6, "WRITE_32"},
+    {7, "READ_32"},      {8, "PARAM_32"},     {10, "PIN_MULT_32"},
+    {11, "UNPIN_MULT_32"}, {12, "CACHE_32"},  {13, "GET_ID"},
+    {14, "SHARE"},       {15, "GET_FD"},      {16, "FROM_FD"},
+    {17, "CACHE_LIST"},  {18, "RESERVE"},     {100, "ALLOC_KIND"},
+};
+constexpr int kNvmapSlots = (int)(sizeof kNvmapNrs / sizeof kNvmapNrs[0]);
+unsigned gNvmapCnt[kNvmapSlots];
+unsigned gNvmapFail[kNvmapSlots];
+unsigned gNvmapTotal = 0, gNvmapOther = 0;
+unsigned gNvmapRwLogged = 0, gNvmapErrLogged = 0;
+
+int nvmapNrSlot(unsigned nr) {
+    for (int i = 0; i < kNvmapSlots; i++)
+        if (kNvmapNrs[i].nr == nr)
+            return i;
+    return -1;
+}
+
+/* Que hay detras del 'handle' que manda el blob (deberia ser un fd de dmabuf: eso
+ * decide el caso (c)). */
+bool fdNameOf(int fd, char* out, size_t n) {
+    char path[48];
+    if (fd < 0 || fd > 4096) { out[0] = 0; return false; }
+    snprintf(path, sizeof path, "/proc/self/fd/%d", fd);
+    ssize_t r = readlink(path, out, n - 1);
+    if (r <= 0) { out[0] = 0; return false; }
+    out[r] = '\0';
+    return true;
+}
+
+}  // namespace
+
+static void traceNvmapCmd(int fd, unsigned request, void* argp, int ret) {
+    unsigned nr = request & 0xffu;
+    unsigned size = (request >> kIocSizeShift) & 0x3fffu;
+    int slot = nvmapNrSlot(nr);
+    gNvmapTotal++;
+    if (slot >= 0) {
+        gNvmapCnt[slot]++;
+        if (ret != 0)
+            gNvmapFail[slot]++;
+    }
+
+    if ((nr == 6 || nr == 7) && argp != nullptr && size >= sizeof(NvmapRw)) {
+        const NvmapRw* a = (const NvmapRw*)argp;
+        char hn[48];
+        bool esfd = fdNameOf((int)a->handle, hn, sizeof hn);
+        if (gNvmapRwLogged < 24u) {
+            gNvmapRwLogged++;
+            __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                    "nvmap %s fd=%d handle=%u(%s) off=%u elem=%u hstride=%u ustride=%u "
+                    "count=%u addr=0x%x -> %s (%s)",
+                    nr == 6 ? "WRITE_32" : "READ_32", fd, a->handle,
+                    esfd ? hn : "NO-ES-UN-FD-DE-ESTE-PROCESO",
+                    a->offset, a->elem_size, a->hmem_stride, a->user_stride, a->count,
+                    a->addr, ret == 0 ? "ok" : "FALLO",
+                    ret == 0 ? "" : strerror(errno));
+        }
+        if (ret != 0 && gNvmapErrLogged < 12u) {
+            gNvmapErrLogged++;
+            const char* why;
+            if (!a->addr || !a->count || !a->elem_size)
+                why = "addr/count/elem_size en 0 -> nvmap_ioctl.c:545";
+            else if (!esfd)
+                why = "el handle no es un fd propio -> unmarshal_user_handle()=0 -> nvmap_ioctl.c:549";
+            else
+                why = "geometria: leer h->size exige el pr_warn 'mocha nvmap rw' del kernel (rw_handle, nvmap_ioctl.c:1024-1042)";
+            __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                    "nvmap %s FALLO, causa sospechosa: %s", nr == 6 ? "WRITE_32" : "READ_32", why);
+        }
+        return;
+    }
+
+    if (nr == 12 && argp != nullptr && size >= sizeof(NvmapCache)) {
+        const NvmapCache* a = (const NvmapCache*)argp;
+        if (ret != 0 && gNvmapErrLogged < 12u) {
+            gNvmapErrLogged++;
+            __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                    "nvmap CACHE_32 FALLO handle=%u len=%u op=%d (%s)",
+                    a->handle, a->len, a->op, strerror(errno));
+        }
+        return;
+    }
+
+    if (ret != 0 && gNvmapErrLogged < 12u) {
+        gNvmapErrLogged++;
+        __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                "nvmap nr=%u tam=%u fd=%d FALLO (%s)", nr, size, fd, strerror(errno));
+        return;
+    }
+
+    gNvmapOther++;
+    if ((gNvmapOther % 4000u) == 1u) {
+        for (int i = 0; i < kNvmapSlots; i++)
+            if (gNvmapCnt[i] != 0)
+                __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                        "nvmap %s: %u llamadas, %u fallas", kNvmapNrs[i].name,
+                        gNvmapCnt[i], gNvmapFail[i]);
+        __android_log_print(ANDROID_LOG_INFO, "mocha-hal30",
+                "nvmap: %u ioctls en total, %u sin clasificar", gNvmapTotal, gNvmapOther);
+    }
+}
+
 extern "C" int ioctl(int fd, unsigned request, ...) {
     va_list args;
     va_start(args, request);
@@ -1435,9 +1588,15 @@ extern "C" int ioctl(int fd, unsigned request, ...) {
     }
 
     int ret = gRealIoctl(fd, request, argp);
-    bool esNvhost = (fdKind(fd) == 1) || (((request >> kIocTypeShift) & 0xffu) == kNvhostMagic);
-    if (!esNvhost)
+    int kind = fdKind(fd);
+    unsigned magic = (request >> kIocTypeShift) & 0xffu;
+    bool esNvhost = (kind == 1) || (magic == kNvhostMagic);
+    bool esNvmap = (kind == 3) || (magic == kNvmapMagic);
+    if (!esNvhost && !esNvmap)
         return ret;
+
+    if (esNvmap)
+        traceNvmapCmd(fd, request, argp, ret);
 
     if (ret != 0)
         gIoctlFailed++;
@@ -1461,7 +1620,8 @@ extern "C" int ioctl(int fd, unsigned request, ...) {
         }
     }
 
-    traceSyncptCmd(fd, request, argp, ret);
+    if (esNvhost)
+        traceSyncptCmd(fd, request, argp, ret);
 
     if (gIoctlLogged < 60u) {
         gIoctlLogged++;
