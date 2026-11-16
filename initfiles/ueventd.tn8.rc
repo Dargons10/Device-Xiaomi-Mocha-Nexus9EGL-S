@@ -1,7 +1,13 @@
 /dev/tegra-throughput	0666	system	system
 /dev/nvmap      0666    system  system
-/dev/tegra_avpchannel   0660    media   media
-/dev/tegra_audio_avpchannel	0660	media	media
+# K-51 (2026-11-16): los dos canales AVP pasan a 0666 porque el provider de camara de Android 12
+# corre como uid 1047 (cameraserver) y no puede abrir un nodo media:media 0660 -> EACCES -> el
+# codificador JPEG nativo no abria (ver initfiles/init.tegra.rc 'on init', donde esta el fix que SI
+# se aplica).  Estas lineas quedan correctas para cuando DT-40 este resuelto: hoy este fichero se
+# instala en $(TARGET_ROOT_OUT) (initfiles/Android.mk:112-115) y ueventd en A12 solo lee
+# /vendor/etc/ueventd.rc y /odm/etc/ueventd.rc, que en mocha no existen.
+/dev/tegra_avpchannel   0666    media   media
+/dev/tegra_audio_avpchannel	0666	media	media
 /dev/ov2710     0660    media   camera
 /dev/imx091     0660    media   camera
 /dev/ov7695     0660    media   camera

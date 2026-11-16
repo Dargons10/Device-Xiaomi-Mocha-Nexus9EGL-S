@@ -12,6 +12,27 @@ on early-init
     mount debugfs debugfs /sys/kernel/debug mode=0755
 
 on init
+    # K-33 / K-51 (medido 2026-11-16, es LA causa por la que no salian las fotos):
+    # los canales AVP los crea nvavp (drivers/media/platform/tegra/nvavp/nvavp_dev.c:2496,
+    # video_misc_dev.name = "tegra_avpchannel") con modo 0660 y dueno media:media, pero en
+    # Android 12 el provider de camara corre como uid 1047 (cameraserver) con grupos
+    # 1004/1006/1026: ni es media (1013) ni esta en el grupo media.  strace sobre el provider
+    # durante un disparo lo dejo visto:
+    #   openat("/dev/nvhost-vic")      = 17        (este si: es 0666)
+    #   openat("/dev/tegra_avpchannel") = -1 EACCES (Permission denied)
+    # Y eso producia exactamente la cadena que teniamos desde el principio:
+    #   Encoder_Open ++  /  Encoder_Close ++  /  doJpegEncoding -- (error 0x6)
+    #   threadLoop: jpeg encoding fail  ->  'No JPEG/HEIC header detected'  ->  Storage falla.
+    # Al abrir los permisos a mano (chmod 0666) el codificador MSENC abrio bien: aparecio la marca
+    # de salida 'Encoder_Open --', '[Image-Enc] ... Thumbnail and Primary done' y la foto se guardo
+    # verbatim por via NATIVA: IMG_20261116_192257.jpg, 299803 bytes, 1920x1080,
+    # uri=content://media/external/images/media/233.  Sin V4L2 y sin HAL propio.
+    # Nota: NO puede resolverse con ueventd.tn8.rc en este arbol: ese modulo se instala en
+    # $(TARGET_ROOT_OUT) (initfiles/Android.mk:112-115, herencia del port 17.1) y en Android 12
+    # ueventd solo lee /vendor/etc/ueventd.rc y /odm/etc/ueventd.rc, que aqui no existen (DT-40).
+    chmod 0666 /dev/tegra_avpchannel
+    chmod 0666 /dev/tegra_audio_avpchannel
+
     mkdir /mnt/media_rw/sdcard1 0700 media_rw media_rw
     mkdir /storage/sdcard1 0700 root sdcard_r
 
@@ -269,6 +290,11 @@ on post-fs-data
     start logger
 
 on property:sys.boot_completed=1
+    # Repetir el chmod de K-51: si nvavp probea despues de 'on init' (modulo diferido o AVP OS
+    # cargado mas tarde), el primer chmod no encuentra el nodo.  init tolera el fallo, asi que
+    # repetirlo aqui sale barato y garantiza el nodo correcto antes de cualquier disparo.
+    chmod 0666 /dev/tegra_avpchannel
+    chmod 0666 /dev/tegra_audio_avpchannel
     # Stop the logger service
     stop logger
     # Disable AudioFx (crash-loop on this device)
