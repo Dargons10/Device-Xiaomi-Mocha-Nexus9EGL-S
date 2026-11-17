@@ -1257,12 +1257,14 @@ static const struct {
       ANDROID_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT_RGGB,
       100, 1600,
       2.10f, 2.2f, 2.69f, 1.51f },
-    /* camera1: OV5693, montaje 'front', 270 para Android
-     * (2026-11-17, medido con una foto real del dispositivo: IMG_20261117_073041.jpg salio
-     * 1944x2592 con EXIF Orientation 1 y la cara boca abajo, o sea el 90 que heredabamos de la
-     * inversion de nvcamera.conf ('camera1=/dev/ov5693,front,270') dejaba la selfie girada 180
-     * grados.  El 90 de la trasera si esta verificado (IMG_20261117_072913.jpg sale derecha). */
-    { "ov5693(front)", ANDROID_LENS_FACING_FRONT, 270,
+    /* camera1: OV5693, montaje 'front', 90 mientras se comprueba el 270 por separado
+     * (2026-11-17: publicar 270 --decidido por la selfie IMG_20261117_073041.jpg, que salio 1944x2592
+     * con EXIF Orientation 1 y la cara boca abajo-- coincidio con que la camara dejara de conectar:
+     * CameraService lo pago con 'connectHelper:1865: Illegal argument to HAL module for camera "0"'
+     * en los builds df4884a7 y f9568c0, mientras que d03e948 si conectaba.  El 270 es el unico cambio
+     * pendiente aparte del rango de fps, asi que se revierte el 270 primero para poder medir cual de
+     * los dos es.  90 es el valor verificado funcionando en el dispositivo. */
+    { "ov5693(front)", ANDROID_LENS_FACING_FRONT, 90,
       2592, 1944,
       { { 2592, 1944, 15 }, { 1920, 1080, 30 }, { 1280, 720, 60 }, { 640, 480, 90 } }, 4,
       ANDROID_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT_RGGB,
@@ -1523,7 +1525,26 @@ static bool seed_static_metadata(camera_metadata_t **metadata_ptr, int camera_id
      * 'length=0; index=0' que muestra el log de la app de camara).
      */
     int32_t pix_array[] = { (int32_t)szs[0].w, (int32_t)szs[0].h };
-    int32_t fps_min[] = { 1, szs[0].fps };
+    /* Rango de fps objetivo del AE: UNA sola pareja, atada a la talla maxima anunciada.
+     * Medido 2026-11-17 con cuatro installs en el dispositivo:
+     *  - {1,15} con el knob poniendo 3280x2460 como maxima: la camara conecta y el still sale a
+     *    3280x2460 (build d03e948, verificado con foto real).  El shim API1 convierte esa pareja en la
+     *    lista 'supported preview frame rates' y CameraSource la comprueba con strstr (CameraSource.cpp
+     *    lineas 419-433), asi que un perfil de video que pida 30 rebota con 'Requested frame rate (30)
+     *    is not supported: 15' -> setupMediaSource err=-19 -> 'MediaRecorder: start failed: -19'.
+     *  - {1,30} con la misma maxima 3280x2460: el blob de NVIDIA no construye su informacion estatica:
+     *    'NvCameraHal3 getStaticCharacteristics: Unable to allocate static info: Unknown error -196626'
+     *    -> 'HAL_camera_device_open: Unable to allocate static info: No such device (-19)'
+     *    -> 'Camera2ClientBase initializeImpl: unable to initialize device: Invalid argument (-22)'
+     *    -> "connectHelper:1865: Illegal argument to HAL module for camera \"0\"" y la app muestra
+     *    'Error de camara'.  Medido con los builds df4884a7, f9568c0 y 58ed735; con d03e948 abria.
+     *  - Dos parejas ({15,15},{30,30} = 4 valores) tampoco: el shim lee esta etiqueta obligatoria con
+     *    con-count exacto 2 (api1/client2/Parameters.cpp lineas 163, 1031 y 1431) y falla igual.
+     * Conclusion: mientras la talla maxima anunciada sea el modo de 8 Mpx, el techo de fps ha de ser el
+     * de ese modo (15), y el perfil de video se declara a 15 fps en media_profiles_V1_0.xml para que
+     * CameraSource lo acepte.  No anunciar nunca un fps por encima del del modo mas grande. */
+    int32_t fps_ranges[] = { 1, szs[0].fps };
+
     int32_t ae_comp[] = { 0, 0 };
     uint8_t caps[] = { (uint8_t)ANDROID_REQUEST_AVAILABLE_CAPABILITIES_BACKWARD_COMPATIBLE };
     int64_t exp_range[] = { 1000000LL, 30000000000LL };
@@ -1715,7 +1736,8 @@ static bool seed_static_metadata(camera_metadata_t **metadata_ptr, int camera_id
     ok = upsert_metadata_entry(&md, ANDROID_CONTROL_AE_AVAILABLE_MODES, ae_modes, 1, camera_id, -1) && ok;
     ok = upsert_metadata_entry(&md, ANDROID_CONTROL_AF_AVAILABLE_MODES, af_modes, 1, camera_id, -1) && ok;
     ok = upsert_metadata_entry(&md, ANDROID_CONTROL_AWB_AVAILABLE_MODES, awb_modes, 1, camera_id, -1) && ok;
-    ok = upsert_metadata_entry(&md, ANDROID_CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES, fps_min, 2, camera_id, -1) && ok;
+    ok = upsert_metadata_entry(&md, ANDROID_CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES, fps_ranges, 2,
+                               camera_id, -1) && ok;
     ok = upsert_metadata_entry(&md, ANDROID_CONTROL_AE_COMPENSATION_RANGE, ae_comp, 2, camera_id, -1) && ok;
 
     ok = upsert_metadata_entry(&md, ANDROID_NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES,

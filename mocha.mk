@@ -241,10 +241,16 @@ PRODUCT_COPY_FILES += \
     $(LOCAL_PATH)/permissions/com.nvidia.feature.opengl4.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/com.nvidia.feature.opengl4.xml \
     $(LOCAL_PATH)/permissions/com.nvidia.nvsi.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/com.nvidia.nvsi.xml
 
-# OMX(SOFTWARE)
+# Codec selection.  debug.stagefright.ccodec=0 used to force the legacy OMX path (the comment here
+# said "OMX(SOFTWARE)"), but Android 12 no longer builds libOmxCore/libOmxVenc/libOmxVdec (grep over
+# frameworks/av/media/libstagefright/Android.bp returns nothing), so with that property set there is
+# no component host at all and every video encoder creation fails.  Measured on the device:
+#   MOCHA-REC: setupMediaSource err=-19  /  E/MediaRecorder: start failed: -19  (-19 = -ENODEV)
+# and after setting the property to 1 the encoder probe passes and the recorder reaches the camera
+# source.  CCodec (codec2) is therefore left at its default so the software codecs declared by
+# media_codecs_google_video.xml are used.
 PRODUCT_PROPERTY_OVERRIDES += \
-    debug.stagefright.c2-poolmask=0x50000 \
-    debug.stagefright.ccodec=0
+    debug.stagefright.c2-poolmask=0x50000
 
 # Overlay
 DEVICE_PACKAGE_OVERLAYS += \

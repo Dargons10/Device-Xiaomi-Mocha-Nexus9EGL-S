@@ -19,6 +19,16 @@
      on an android-powered device.
 -->
 <MediaSettings>
+  <!-- Video frameRate is 15, not 30, on purpose (measured 2026-11-17 on the device).  The camera
+       HAL can only announce 15 fps while the 8 Mpx mode 3280x2460 (imx179.c mode_3280x2460) is in the
+       announced size list: the NVIDIA blob refuses to build its static characteristics otherwise
+       ('NvCameraHal3 getStaticCharacteristics: Unable to allocate static info: Unknown error -196626'
+       -> 'connectHelper:1865: Illegal argument to HAL module for camera "0"').  But StagefrightRecorder
+       used to raise this 15 to its own encoder minimum of 30 - see clipVideoFrameRate(), patched next
+       to frameworks/av/media/libmediaplayerservice/StagefrightRecorder.cpp - and CameraSource then
+       rejected the request ('Requested frame rate (30) is not supported: 15'), so recording died at
+       'setupMediaSource err=-19' leaving 0 byte .pending-*.mp4 files.  Both ends have to agree: 720p
+       at 15 fps here, the fps of the largest announced sensor mode. -->
   <!-- Each camcorder profile defines a set of predefined configuration parameters -->
   <!-- Back Camera -->
   <CamcorderProfiles cameraId="0">
@@ -28,7 +38,7 @@
              bitRate="8000000"
              width="1280"
              height="720"
-             frameRate="30" />
+             frameRate="15" />
 
       <Audio codec="aac"
              bitRate="96000"
@@ -41,7 +51,7 @@
              bitRate="8000000"
              width="1280"
              height="720"
-             frameRate="30" />
+             frameRate="15" />
 
       <Audio codec="aac"
              bitRate="96000"
@@ -54,7 +64,7 @@
              bitRate="8000000"
              width="1280"
              height="720"
-             frameRate="30" />
+             frameRate="15" />
 
       <Audio codec="aac"
              bitRate="96000"
@@ -67,7 +77,7 @@
              bitRate="8000000"
              width="1280"
              height="720"
-             frameRate="30" />
+             frameRate="15" />
 
       <!--
             The Audio part of the profile will not be used since time lapse mode
@@ -84,7 +94,7 @@
              bitRate="8000000"
              width="1280"
              height="720"
-             frameRate="30" />
+             frameRate="15" />
 
       <!--
             The Audio part of the profile will not be used since time lapse mode
@@ -101,7 +111,7 @@
              bitRate="8000000"
              width="1280"
              height="720"
-             frameRate="30" />
+             frameRate="15" />
 
       <!--
             The Audio part of the profile will not be used since time lapse mode
@@ -128,7 +138,7 @@
              bitRate="8000000"
              width="1280"
              height="720"
-             frameRate="30" />
+             frameRate="15" />
 
       <Audio codec="aac"
              bitRate="96000"
@@ -141,7 +151,7 @@
              bitRate="8000000"
              width="1280"
              height="720"
-             frameRate="30" />
+             frameRate="15" />
 
       <Audio codec="aac"
              bitRate="96000"
@@ -154,7 +164,7 @@
              bitRate="8000000"
              width="1280"
              height="720"
-             frameRate="30" />
+             frameRate="15" />
 
       <!--
             The Audio part of the profile will not be used since time lapse mode
@@ -171,7 +181,7 @@
              bitRate="8000000"
              width="1280"
              height="720"
-             frameRate="30" />
+             frameRate="15" />
 
       <!--
             The Audio part of the profile will not be used since time lapse mode
@@ -188,7 +198,7 @@
              bitRate="8000000"
              width="1280"
              height="720"
-             frameRate="30" />
+             frameRate="15" />
 
       <Audio codec="aac"
              bitRate="96000"
@@ -201,7 +211,7 @@
              bitRate="8000000"
              width="1280"
              height="720"
-             frameRate="30" />
+             frameRate="15" />
 
       <!--
             The Audio part of the profile will not be used since time lapse mode

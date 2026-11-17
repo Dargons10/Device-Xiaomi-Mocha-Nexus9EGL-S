@@ -1,11 +1,3 @@
-# frameworks/av: cumulative camera + codec + audio changes for mocha (Tegra blobs, kernel 3.10)
-#
-# Regenerado 2026-11-16 con: git -C frameworks/av diff HEAD  -> 21 ficheros.
-# Antes cubria 19 y dejaba fuera camera/VendorTagDescriptor.cpp y
-#   services/camera/libcameraservice/common/CameraProviderManager.cpp (UNREG) y su hunk de
-#   camera/Android.bp no reproducia el arbol (RESIDUAL: la marca de vendor tags que anade
-#   el wrapper del HAL se declara ahi).
-#
 diff --git a/camera/Android.bp b/camera/Android.bp
 index 1924e80b78..3b3a7c4c89 100644
 --- a/camera/Android.bp
@@ -664,7 +656,7 @@ index cde8d85e87..38128e152b 100644
  
  } // namespace android
 diff --git a/media/libmediaplayerservice/StagefrightRecorder.cpp b/media/libmediaplayerservice/StagefrightRecorder.cpp
-index d72b0b2332..e8cdeace07 100644
+index d72b0b2332..fe094d1b33 100644
 --- a/media/libmediaplayerservice/StagefrightRecorder.cpp
 +++ b/media/libmediaplayerservice/StagefrightRecorder.cpp
 @@ -16,6 +16,7 @@
@@ -712,7 +704,40 @@ index d72b0b2332..e8cdeace07 100644
              break;
          }
  
-@@ -2167,12 +2187,14 @@ status_t StagefrightRecorder::setupMPEG4orWEBMRecording() {
+@@ -1622,7 +1642,31 @@ void StagefrightRecorder::clipVideoFrameRate() {
+                         "enc.vid.fps.min", mVideoEncoder);
+     int maxFrameRate = mEncoderProfiles->getVideoEncoderParamByName(
+                         "enc.vid.fps.max", mVideoEncoder);
+-    if (mFrameRate < minFrameRate && minFrameRate != -1) {
++    // MOCHA (measured 2026-11-17, on 8.1 Mpx photos + 720p video).  Raising the
++    // intent to the encoder minimum is what made video recording impossible:
++    //   the app asked for 15 fps (our media_profiles_V1_0.xml), this clip pushed it
++    //   to 30 fps, CameraSource::validateCameraSize() then compared 30 against the
++    //   API1 shim's supported preview frame rates, which say "15", and failed:
++    //     W/StagefrightRecorder: Intended video encoding frame rate (15 fps) is too small and will be set to (30 fps)
++    //     E/CameraSource:        Requested frame rate (30) is not supported: 15
++    //     W/StagefrightRecorder: MOCHA-REC: setupMediaSource err=-19
++    //     E/StagefrightRecorder: MOCHA-REC: prepareInternal failed -19
++    //     E/MediaRecorder:       start failed: -19   ->  0 byte .pending-*.mp4 files
++    // 30 fps cannot simply be announced by the HAL instead: while the 8 Mpx mode
++    // 3280x2460 (imx179.c mode_3280x2460, 15 fps) is in the announced size list,
++    // the NVIDIA blob cannot allocate its static characteristics and the camera
++    // stops connecting (three builds measured: 0x…df4884a7, 0x…f9568c0f,
++    // 0x…58ed7359 all failed with
++    //   NvCameraHal3 getStaticCharacteristics: Unable to allocate static info: Unknown error -196626
++    //   connectHelper:1865: Illegal argument to HAL module for camera "0").
++    // So honour any sane intent instead of forcing it upwards: 10 fps or more is
++    // passed through untouched, and only an absurd request (< 10 fps) is raised to
++    // the encoder minimum as before.
++    if (mFrameRate < minFrameRate && minFrameRate != -1 && mFrameRate >= 10) {
++        ALOGI("MOCHA-FPS: keeping the intended %d fps; %d fps is the encoder "
++              "minimum but it is not reachable through this camera HAL",
++              mFrameRate, minFrameRate);
++    } else if (mFrameRate < minFrameRate && minFrameRate != -1) {
+         ALOGW("Intended video encoding frame rate (%d fps) is too small"
+              " and will be set to (%d fps)", mFrameRate, minFrameRate);
+         mFrameRate = minFrameRate;
+@@ -2167,12 +2211,14 @@ status_t StagefrightRecorder::setupMPEG4orWEBMRecording() {
  
          sp<MediaSource> mediaSource;
          err = setupMediaSource(&mediaSource);
@@ -727,7 +752,7 @@ index d72b0b2332..e8cdeace07 100644
          if (err != OK) {
              return err;
          }
-@@ -2189,6 +2211,12 @@ status_t StagefrightRecorder::setupMPEG4orWEBMRecording() {
+@@ -2189,6 +2235,12 @@ status_t StagefrightRecorder::setupMPEG4orWEBMRecording() {
      const bool disableAudio = mCaptureFpsEnable && mCaptureFps < mFrameRate;
      if (!disableAudio && mAudioSource != AUDIO_SOURCE_CNT) {
          err = setupAudioEncoder(writer);
