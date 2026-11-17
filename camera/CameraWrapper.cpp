@@ -1257,8 +1257,12 @@ static const struct {
       ANDROID_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT_RGGB,
       100, 1600,
       2.10f, 2.2f, 2.69f, 1.51f },
-    /* camera1: OV5693, montaje 'front', angulo fisico 270 */
-    { "ov5693(front)", ANDROID_LENS_FACING_FRONT, 90,
+    /* camera1: OV5693, montaje 'front', 270 para Android
+     * (2026-11-17, medido con una foto real del dispositivo: IMG_20261117_073041.jpg salio
+     * 1944x2592 con EXIF Orientation 1 y la cara boca abajo, o sea el 90 que heredabamos de la
+     * inversion de nvcamera.conf ('camera1=/dev/ov5693,front,270') dejaba la selfie girada 180
+     * grados.  El 90 de la trasera si esta verificado (IMG_20261117_072913.jpg sale derecha). */
+    { "ov5693(front)", ANDROID_LENS_FACING_FRONT, 270,
       2592, 1944,
       { { 2592, 1944, 15 }, { 1920, 1080, 30 }, { 1280, 720, 60 }, { 640, 480, 90 } }, 4,
       ANDROID_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT_RGGB,
@@ -1287,6 +1291,8 @@ static const struct {
  * datos que hasta hoy estaban fijos en kMochaCameras:
  *   /data/local/tmp/mocha-sensor-max          con 'WxH'            -> maxima talla anunciada
  *   /data/local/tmp/mocha-sensor-orientation  con 0/90/180/270     -> ANDROID_SENSOR_ORIENTATION
+ *      (un solo numero afecta solo a la trasera; 'ANGULO_TRASERA,ANGULO_FRONTAL' permite fijar
+ *      tambien la frontal sin recompilar)
  *   /data/local/tmp/mocha-drop-16x9           cualquier contenido  -> descarta las tallas 16:9
  *      (solo la trasera; sirve para medir si el HAL llega a montar el modo 3280x2460 cuando la app
  *      ya no tiene una talla 16:9 donde elegir: la eleccion de PhotoModule sigue el aspecto del
@@ -1340,24 +1346,28 @@ static bool mocha_knob_max_size(int camera_id, unsigned int *w, unsigned int *h)
 
 static bool mocha_knob_orientation(int camera_id, int32_t *out)
 {
-    /* Solo la trasera: la frontal publica 90 y esa si esta verificada (las selfies salen derechas). */
-    if (camera_id != 0)
-        return false;
     FILE *f = fopen("/data/local/tmp/mocha-sensor-orientation", "r");
     if (f == NULL)
         return false;
-    char buf[16];
+    char buf[32];
     size_t n = fread(buf, 1, sizeof(buf) - 1, f);
     fclose(f);
     if (n == 0)
         return false;
-    long v = strtol(buf, NULL, 10);
-    if (v != 0 && v != 90 && v != 180 && v != 270) {
-        ALOGE("%s: knob mocha-sensor-orientation invalido: '%s' (valores validos 0/90/180/270)",
-              __FUNCTION__, buf);
+    long v[2] = { -1, -1 };
+    char *end = NULL;
+    v[0] = strtol(buf, &end, 10);
+    if (end != NULL && *end == ',')
+        v[1] = strtol(end + 1, NULL, 10);
+    if (camera_id != 0 && v[1] < 0)
+        return false;   /* forma de un numero: solo manda en la trasera, sin ruido en el log */
+    long picked = (camera_id == 0) ? v[0] : v[1];
+    if (picked != 0 && picked != 90 && picked != 180 && picked != 270) {
+        ALOGE("%s: camara %d knob mocha-sensor-orientation invalido: '%s' (vale 0/90/180/270, o "
+              "TRASERA,FRONTAL)", __FUNCTION__, camera_id, buf);
         return false;
     }
-    *out = (int32_t)v;
+    *out = (int32_t)picked;
     return true;
 }
 
