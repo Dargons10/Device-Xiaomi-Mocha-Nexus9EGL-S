@@ -196,6 +196,44 @@ index f83c0a4926f9..c3c3f7cc9736 100644
      } else {
          requireVkContext();
      }
+diff --git a/media/jni/android_media_Utils.cpp b/media/jni/android_media_Utils.cpp
+index ecd9cc1cd098..4f991c626c03 100644
+--- a/media/jni/android_media_Utils.cpp
++++ b/media/jni/android_media_Utils.cpp
+@@ -110,7 +110,33 @@ uint32_t Image_getBlobSize(LockedImage* buffer, bool usingRGBAOverride) {
+          */
+         ALOGW("%s: No JPEG/HEIC header detected, defaulting to size=width=%d",
+                 __FUNCTION__, width);
++
++        /* mocha (hallazgo K-55, 2026-11-18): el HAL de NVIDIA de 2015 no escribe la cabecera de
++         * transporte camera3_jpeg_blob al final del buffer, asi que este fallback entregaba el
++         * reservado completo.  El framework reserva ANDROID_JPEG_MAX_SIZE (nuestro wrapper lo
++         * dimensiona a 2 bytes por pixel) y el blob deja CEROS detras del marcador de fin de
++         * imagen FFD9.  Medido en ficheros del dispositivo:
++         *   frontal IMG_20261118_110652.jpg  fichero 10.077.749 B, JPEG real 1.245.867 B; detras
++         *     de FFD9 hay 8.831.882 bytes y 8.831.876 de ellos son 0x00
++         *   trasera IMG_20261117_072913.jpg  fichero 16.137.653 B, JPEG real ~2.309.055 B
++         * Solo se recorta si detras del ultimo FFD9 hay ceros: un HAL que entregue la talla exacta
++         * o que escriba la cabecera de transporte ni pasa por aqui.  Para un JPEG normal sin
++         * relleno la condicion es falsa (cero-efecto sobre lo que ya funciona). */
+         size = width;
++        if (!usingRGBAOverride && blobBuffer != NULL && width > 4) {
++            uint32_t trailingZeros = 0;
++            while (trailingZeros < width && blobBuffer[width - 1 - trailingZeros] == 0x00) {
++                trailingZeros++;
++            }
++            if (trailingZeros > 0 && trailingZeros < (width - 2) &&
++                    blobBuffer[width - trailingZeros - 2] == 0xFF &&
++                    blobBuffer[width - trailingZeros - 1] == 0xD9) {
++                ALOGI("%s: mocha K-55: JPEG real %u B de %u B reservados; %u bytes de relleno "
++                        "tras FFD9 recortados", __FUNCTION__, width - trailingZeros, width,
++                        trailingZeros);
++                size = width - trailingZeros;
++            }
++        }
+     }
+ 
+     return size;
 diff --git a/mms/java/android/telephony/MmsManager.java b/mms/java/android/telephony/MmsManager.java
 index d541da09f45d..8aa4d6ac56e9 100644
 --- a/mms/java/android/telephony/MmsManager.java
