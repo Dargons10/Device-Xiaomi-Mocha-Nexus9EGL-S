@@ -1257,14 +1257,20 @@ static const struct {
       ANDROID_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT_RGGB,
       100, 1600,
       2.10f, 2.2f, 2.69f, 1.51f },
-    /* camera1: OV5693, montaje 'front', 90 mientras se comprueba el 270 por separado
-     * (2026-11-17: publicar 270 --decidido por la selfie IMG_20261117_073041.jpg, que salio 1944x2592
-     * con EXIF Orientation 1 y la cara boca abajo-- coincidio con que la camara dejara de conectar:
-     * CameraService lo pago con 'connectHelper:1865: Illegal argument to HAL module for camera "0"'
-     * en los builds df4884a7 y f9568c0, mientras que d03e948 si conectaba.  El 270 es el unico cambio
-     * pendiente aparte del rango de fps, asi que se revierte el 270 primero para poder medir cual de
-     * los dos es.  90 es el valor verificado funcionando en el dispositivo. */
-    { "ov5693(front)", ANDROID_LENS_FACING_FRONT, 90,
+    /* camera1: OV5693, montaje 'front', 270 (2026-11-18, medido en el dispositivo).
+     * El 90 estaba puesto solo como medida provisional: la selfie IMG_20261117_073041.jpg salio
+     * 1944x2592 con EXIF Orientation 1 y la cara boca abajo, o sea 90 esta mal para la frontal.
+     * El 270 se revirti6 el 2026-11-17 porque coincidio con que la camara dejara de conectar
+     * ('connectHelper:1865: Illegal argument to HAL module for camera "0"'), pero esa causa esta
+     * medida ahora: todos los builds que anunciaron la pareja {1,30} (o dos parejas de fps) fallaron
+     * igual y los que anunciaron {1,15} conectan, asi que el 270 no tenia la culpa.
+     * Medicion del 270 (2026-11-18, mando mocha-sensor-orientation=90,270, modulo foto, camara 1):
+     *   'camera ID 1' -> 'Camera 1: Opened' -> 'orientacion=270' -> 0 errores del blob,
+     *   'ov5693_set_mode: mode->res_x = 2592 / res_y = 1944' y foto real IMG_20261118_091951.jpg
+     *   1944x2592, media 148,8, R154,9 G147,1 B141,6, con la lampara de techo y la union
+     *   techo-pared en el tercio superior de la imagen (antes, con 90, la mitad luminosa caia
+     *   abajo: tercio superior 88,6 / inferior 130,7). */
+    { "ov5693(front)", ANDROID_LENS_FACING_FRONT, 270,
       2592, 1944,
       { { 2592, 1944, 15 }, { 1920, 1080, 30 }, { 1280, 720, 60 }, { 640, 480, 90 } }, 4,
       ANDROID_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT_RGGB,
