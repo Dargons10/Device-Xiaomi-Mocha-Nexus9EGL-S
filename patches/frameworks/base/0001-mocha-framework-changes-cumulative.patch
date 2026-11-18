@@ -197,38 +197,62 @@ index f83c0a4926f9..c3c3f7cc9736 100644
          requireVkContext();
      }
 diff --git a/media/jni/android_media_Utils.cpp b/media/jni/android_media_Utils.cpp
-index ecd9cc1cd098..4f991c626c03 100644
+index ecd9cc1cd098..49d8ca3f9f50 100644
 --- a/media/jni/android_media_Utils.cpp
 +++ b/media/jni/android_media_Utils.cpp
-@@ -110,7 +110,33 @@ uint32_t Image_getBlobSize(LockedImage* buffer, bool usingRGBAOverride) {
+@@ -110,7 +110,57 @@ uint32_t Image_getBlobSize(LockedImage* buffer, bool usingRGBAOverride) {
           */
          ALOGW("%s: No JPEG/HEIC header detected, defaulting to size=width=%d",
                  __FUNCTION__, width);
 +
-+        /* mocha (hallazgo K-55, 2026-11-18): el HAL de NVIDIA de 2015 no escribe la cabecera de
-+         * transporte camera3_jpeg_blob al final del buffer, asi que este fallback entregaba el
-+         * reservado completo.  El framework reserva ANDROID_JPEG_MAX_SIZE (nuestro wrapper lo
-+         * dimensiona a 2 bytes por pixel) y el blob deja CEROS detras del marcador de fin de
-+         * imagen FFD9.  Medido en ficheros del dispositivo:
-+         *   frontal IMG_20261118_110652.jpg  fichero 10.077.749 B, JPEG real 1.245.867 B; detras
-+         *     de FFD9 hay 8.831.882 bytes y 8.831.876 de ellos son 0x00
-+         *   trasera IMG_20261117_072913.jpg  fichero 16.137.653 B, JPEG real ~2.309.055 B
-+         * Solo se recorta si detras del ultimo FFD9 hay ceros: un HAL que entregue la talla exacta
-+         * o que escriba la cabecera de transporte ni pasa por aqui.  Para un JPEG normal sin
-+         * relleno la condicion es falsa (cero-efecto sobre lo que ya funciona). */
++        /* mocha (hallazgo K-55, 2026-11-18; corregido el mismo dia al medir por que la primera
++         * version no disparaba): el HAL de NVIDIA de 2015 no escribe la cabecera de transporte
++         * camera3_jpeg_blob AL FINAL del buffer, asi que este fallback entregaba el reservado
++         * completo.  Medido byte a byte en una foto trasera de 8 Mpx hecha ya con la libreria
++         * instalada (IMG_20261118_223507.jpg, 16.137.653 B, la talla exacta del reservado que
++         * anuncia nuestro wrapper: 2 bytes por pixel para 3280x2460):
++         *   0 .. 2.734.105    JPEG real, termina en FF D9
++         *   2.734.106 ..      ceros y mas ceros hasta ~10.000.044  (hasta ahi llega la region de
++         *                     10.000.000 de bytes que el blob considera suya: el suelo que puso el
++         *                     wrapper en ANDROID_JPEG_MAX_SIZE)
++         *   10.000.045 ..     ocho bytes sueltos leidos ff 00 02 aa e5 b7 29; interpretados como
++         *                     cabecera de transporte darian tamano 3.085.281.794, que no cabe en
++         *                     este buffer, o sea que es basura de un buffer reutilizado, no la
++         *                     cabecera camera3_jpeg_blob
++         *   .. 16.137.652     6.137.601 ceros hasta el final del fichero
++         * La primera version del parche miraba solo los ceros pegados al final del buffer y exigia
++         * FF D9 justo detras: aqui el ultimo byte no cero esta en medio del relleno, no detras del
++         * FF D9, asi que no recortaba nada (medido: el log decia 'defaulting to size=width=16137600'
++         * y mi aviso no aparecia).
++         * Condicion correcta: el ULTIMO FF D9 del buffer, y que detras haya una corrida larga de
++         * ceros.  Un FF D9 que aparece dentro de los datos comprimidos va seguido de mas datos, no
++         * de millones de ceros, asi que no se confunde.  Un HAL que entregue la talla exacta o que
++         * escriba la cabecera de transporte en su sitio no pasa por aqui (cero-efecto). */
          size = width;
-+        if (!usingRGBAOverride && blobBuffer != NULL && width > 4) {
-+            uint32_t trailingZeros = 0;
-+            while (trailingZeros < width && blobBuffer[width - 1 - trailingZeros] == 0x00) {
-+                trailingZeros++;
++        if (!usingRGBAOverride && blobBuffer != NULL && width > (8 * 1024)) {
++            uint32_t tailZeros = 0;
++            while (tailZeros < width && blobBuffer[width - 1 - tailZeros] == 0x00) {
++                tailZeros++;
 +            }
-+            if (trailingZeros > 0 && trailingZeros < (width - 2) &&
-+                    blobBuffer[width - trailingZeros - 2] == 0xFF &&
-+                    blobBuffer[width - trailingZeros - 1] == 0xD9) {
-+                ALOGI("%s: mocha K-55: JPEG real %u B de %u B reservados; %u bytes de relleno "
-+                        "tras FFD9 recortados", __FUNCTION__, width - trailingZeros, width,
-+                        trailingZeros);
-+                size = width - trailingZeros;
++            if (tailZeros >= 4096) {
++                int32_t eoi = (int32_t)(width - tailZeros) - 1;
++                for (; eoi >= 1; eoi--) {
++                    if (blobBuffer[eoi - 1] == 0xFF && blobBuffer[eoi] == 0xD9)
++                        break;
++                }
++                /* Medido el 2026-11-18 con un aviso temporal de diagnostico (ya retirado del
++                 * codigo): para una foto trasera de 8 Mpx este buffer llega con width=16.137.600,
++                 * 6.137.601 ceros al final, el primer byte no cero por el final en 9.999.998 y el
++                 * FF D9 buscado hacia atras en 1.569.977 (foto de 1,57 MB) o en 2.734.104 (foto de
++                 * 2,73 MB).  La talla resultante es exacta: el fichero guardado termina en FF D9,
++                 * arranca en FF D8, tiene su SOF0 2460x3280 y PIL lo decodifica entero. */
++                if (eoi >= 1 && (uint32_t)(eoi + 1) < width &&
++                        width - (uint32_t)(eoi + 1) >= 4096) {
++                    ALOGI("%s: mocha K-55: JPEG real %d B de %u B reservados; %u bytes de relleno "
++                            "tras FF D9 recortados", __FUNCTION__, eoi + 1, width,
++                            width - (uint32_t)(eoi + 1));
++                    size = (uint32_t)(eoi + 1);
++                }
 +            }
 +        }
      }

@@ -1,0 +1,3 @@
+
+# Copias de seguridad que regenerate.sh guarda antes de reescribir un cumulativo.
+patches/**/.discard-*

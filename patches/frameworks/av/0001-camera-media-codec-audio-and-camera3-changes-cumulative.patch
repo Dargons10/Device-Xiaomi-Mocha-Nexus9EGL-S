@@ -826,7 +826,7 @@ index 2c1f158eda..1bcbb27f9c 100644
              err = mCodec->queueSecureInputBuffer(
                      bufferIx,
 diff --git a/media/libstagefright/CameraSource.cpp b/media/libstagefright/CameraSource.cpp
-index 08b618384b..aaefc7784c 100644
+index 08b618384b..26bdcab68a 100644
 --- a/media/libstagefright/CameraSource.cpp
 +++ b/media/libstagefright/CameraSource.cpp
 @@ -366,29 +366,49 @@ static int32_t getHighSpeedFrameRate(const CameraParameters& params) {
@@ -902,11 +902,16 @@ index 08b618384b..aaefc7784c 100644
                      frameRate))) {
          return err;
      }
-@@ -1129,6 +1150,11 @@ status_t CameraSource::read(
+@@ -1129,6 +1150,16 @@ status_t CameraSource::read(
          //       Either document why it is safe in this case or address the
          //       issue (e.g. by copying).
          *buffer = new MediaBuffer(frame->unsecurePointer(), frame->size());
-+        {
++        // mocha: estos dos avisos por fotograma se usaron para medir el camino del grabador y
++        // costaban tiempo de pipeline (dos lineas de log por cuadro).  Ahora quedan apagados y se
++        // encienden solo durante el banco de pruebas con:
++        //     setprop debug.mocha.recsueltas 1     (antes de empezar a grabar)
++        static const bool mocha_rec_sueltas = property_get_int32("debug.mocha.recsueltas", 0) != 0;
++        if (mocha_rec_sueltas) {
 +            VideoNativeMetadata *p = (VideoNativeMetadata *)frame->unsecurePointer();
 +            ALOGE("MOCHA-REC read: frame=%p size=%u pBuffer=%p eType=%d",
 +                frame->unsecurePointer(), (unsigned)frame->size(), p->pBuffer, (int)p->eType);
@@ -914,18 +919,21 @@ index 08b618384b..aaefc7784c 100644
          (*buffer)->setObserver(this);
          (*buffer)->add_ref();
          (*buffer)->meta_data().setInt64(kKeyTime, frameTime);
-@@ -1423,8 +1449,13 @@ void CameraSource::processBufferQueueFrame(BufferItem& buffer) {
+@@ -1423,8 +1454,16 @@ void CameraSource::processBufferQueueFrame(BufferItem& buffer) {
          (uint8_t*)heap->getBase() + offset);
      memset(payload, 0, sizeof(VideoNativeMetadata));
      payload->eType = kMetadataBufferTypeANWBuffer;
 -    payload->pBuffer = buffer.mGraphicBuffer->getNativeBuffer();
 +    payload->pBuffer = buffer.mGraphicBuffer ? buffer.mGraphicBuffer->getNativeBuffer() : nullptr;
      payload->nFenceFd = -1;
-+    ALOGE("MOCHA-REC processBufferQueueFrame: mGraphicBuffer=%p payload=%p pBuffer=%p eType=%d w=%d h=%d fmt=%d",
-+        buffer.mGraphicBuffer.get(), payload, payload->pBuffer, (int)payload->eType,
-+        buffer.mGraphicBuffer ? buffer.mGraphicBuffer->getWidth() : 0,
-+        buffer.mGraphicBuffer ? buffer.mGraphicBuffer->getHeight() : 0,
-+        buffer.mGraphicBuffer ? (int)buffer.mGraphicBuffer->getPixelFormat() : 0);
++    static const bool mocha_rec_sueltas = property_get_int32("debug.mocha.recsueltas", 0) != 0;
++    if (mocha_rec_sueltas) {
++        ALOGE("MOCHA-REC processBufferQueueFrame: mGraphicBuffer=%p payload=%p pBuffer=%p eType=%d w=%d h=%d fmt=%d",
++            buffer.mGraphicBuffer.get(), payload, payload->pBuffer, (int)payload->eType,
++            buffer.mGraphicBuffer ? buffer.mGraphicBuffer->getWidth() : 0,
++            buffer.mGraphicBuffer ? buffer.mGraphicBuffer->getHeight() : 0,
++            buffer.mGraphicBuffer ? (int)buffer.mGraphicBuffer->getPixelFormat() : 0);
++    }
  
      // Add the mapping so we can find the corresponding buffer item to release to the buffer queue
      // when the encoder returns the native window buffer.
