@@ -249,7 +249,14 @@ PRODUCT_COPY_FILES += \
 # and after setting the property to 1 the encoder probe passes and the recorder reaches the camera
 # source.  CCodec (codec2) is therefore left at its default so the software codecs declared by
 # media_codecs_google_video.xml are used.
+# 2026-11-20: 'debug.stagefright.ccodec' se fija aqui de forma permanente.  Medido en el
+# dispositivo: con 0 no hay ningun host de componentes en Android 12 (no se compilan
+# libOmxCore/libOmxVenc/libOmxVdec) y la grabacion falla con 'MOCHA-REC: setupMediaSource
+# err=-19' y 'E/MediaRecorder: start failed: -19' (-ENODEV); con 1 el probe del encoder pasa y
+# el grabador llega a la fuente de camara.  Hasta ahora solo se habia puesto en runtime con
+# setprop, asi que cada arranque nuevo lo deshacia y el video volvia a fallar.
 PRODUCT_PROPERTY_OVERRIDES += \
+    debug.stagefright.ccodec=1 \
     debug.stagefright.c2-poolmask=0x50000
 
 # Overlay

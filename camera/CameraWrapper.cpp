@@ -1251,9 +1251,18 @@ static const struct {
      * NVIDIA en 2015, pero el panel de mocha es 1536x2048 con rotacion natural 0 (dumpsys display;
      * panel_rotation = dc->out->rotation = 0) y la salida JPEG debe entregarse en esa orientacion.
      * nvcamera.conf se deja igual: esta funcion sobrescribe la etiqueta con el valor de la tabla. */
+    /* 2026-11-20: la trasera se anuncia de fabrica en el modo nativo del driver, 3280x2460.
+     * Medido en el dispositivo con esta talla anunciada: 'imx179_set_mode: xres 3280 yres 2460',
+     * 'K-75: configure pide 2 streams ... stream 0: 3280x2460 format 0x21' y en las
+     * caracteristicas 'android.scaler.availableStreamConfigurations' salen
+     * [34 3280 2460] [35 3280 2460] [33 3280 2460], ademas de 1920x1080, 1280x720 y 640x480.
+     * fps 15 en la primera entrada a proposito: la unica pareja de
+     * CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES que se publica es {1, szs[0].fps}, y esta medido que
+     * anunciar {1,30} (o publicar dos parejas) hace fallar la conexion con el blob de 2015.
+     * La perilla /data/local/tmp/mocha-sensor-max sigue sirviendo para medir sin recompilar. */
     { "imx179(back)", ANDROID_LENS_FACING_BACK, 90,
-      1920, 1080,
-      { { 1920, 1080, 30 }, { 1280, 720, 90 }, { 640, 480, 90 }, { 0, 0, 0 } }, 3,
+      3280, 2460,
+      { { 3280, 2460, 15 }, { 1920, 1080, 30 }, { 1280, 720, 90 }, { 640, 480, 90 } }, 4,
       ANDROID_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT_RGGB,
       100, 1600,
       2.10f, 2.2f, 2.69f, 1.51f },

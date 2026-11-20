@@ -595,7 +595,7 @@ index 94bb69f09..b54fce3f5 100644
      }
  
 diff --git a/src/com/android/camera/module/ModulesInfo.java b/src/com/android/camera/module/ModulesInfo.java
-index 87090ae25..55deb76aa 100644
+index 87090ae25..cd505764a 100644
 --- a/src/com/android/camera/module/ModulesInfo.java
 +++ b/src/com/android/camera/module/ModulesInfo.java
 @@ -24,6 +24,8 @@ import com.android.camera.CaptureModule;
@@ -607,7 +607,7 @@ index 87090ae25..55deb76aa 100644
  import com.android.camera.app.ModuleManager;
  import com.android.camera.captureintent.CaptureIntentModule;
  import com.android.camera.debug.Log;
-@@ -51,8 +53,28 @@ public class ModulesInfo {
+@@ -51,8 +53,36 @@ public class ModulesInfo {
          registerPhotoModule(moduleManager, photoModuleId, SettingsScopeNamespaces.PHOTO,
                  config.isUsingCaptureModule());
          moduleManager.setDefaultModuleIndex(photoModuleId);
@@ -623,9 +623,17 @@ index 87090ae25..55deb76aa 100644
 +        // y aqui PID 293 es 'mediaserver', que A LA VEZ es el CameraService de esta build y
 +        // tiene abiertos /dev/nvmap y /dev/nvhost-ctrl (codificadores Tegra VIC): camera +
 +        // codificador en el mismo proceso.  La app moria (PID 1883 -> 2042 -> 2203) y la tablet
-+        // se bloqueaba al rato.  Por defecto NO se registra el modulo de VIDEO.
-+        // Reactivar (bajo tu riesgo): settings put global mocha_camera_video 1
-+        if (Settings.Global.getInt(context.getContentResolver(), "mocha_camera_video", 0) != 0) {
++        // se bloqueaba al rato.
++        //
++        // 2026-11-20: el valor por defecto pasa de 0 a 1.  Medido tras 'make installclean' +
++        // reinstalacion: el ajuste global vive en /data, asi que al arrancar de cero vuelve a null
++        // y el modo VIDEO desaparece de la UI.  Eso se leia como 'la camara ha perdido el video'
++        // cuando en realidad era la mitigacion aplicada.  Y la grabacion SI funciona por este camino
++        // cuando la alimentacion aguanta: medidos VID_20261120_153338.mp4 (1280x720 a 15 fps, h264
++        // + AAC) y VID_20261120_215417.mp4 (6737618 B), ambos con el modulo registrado.
++        // El freno manual sigue disponible para el caso de bloque: settings put global
++        // mocha_camera_video 0   (y para volver: ... 1).
++        if (Settings.Global.getInt(context.getContentResolver(), "mocha_camera_video", 1) != 0) {
 +            registerVideoModule(moduleManager, res.getInteger(R.integer.camera_mode_video),
 +                    SettingsScopeNamespaces.VIDEO);
 +            Log.i(TAG, "mocha: modulo de VIDEO registrado (mocha_camera_video=1): camino API1, "
