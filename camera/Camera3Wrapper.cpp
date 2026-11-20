@@ -18,6 +18,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <dirent.h>
 #include <poll.h>
 #include <set>
 #include <stdarg.h>
@@ -1021,6 +1022,192 @@ camera3_device_ops_t operations = {
 };
 }  // namespace
 
+/*
+ * mocha K-71, medido 2026-11-20 (camera.log 07:31:19.678, dmesg 331.950): la apertura del
+ * blob de 2015 puede fallar de forma TRANSITORIA.  El nucleo NVIDIA sondea el sensor para
+ * construir su informacion estatica y vuelve a abrir /dev/nvhost-vi antes de que se libere
+ * la primera asignacion.  drivers/video/tegra/host/t124/t124.c declara los modulos VI/ISP
+ * con .exclusive = true, asi que nvhost_channel_map()
+ * (drivers/video/tegra/host/nvhost_channel.c, rama "num_channels == num_mapped_chs")
+ * sale por la via exclusiva y devuelve -EBUSY:
+ *
+ *   'Opening channel /dev/nvhost-vi (0xc) failed'
+ *   '__nvhost_channelopen: failed to map channel, error: -16'
+ *   'NvCameraHal3Core: getStaticInfo-- error [0x30012]'
+ *   'NvCameraHal3API: HAL_camera_device_open: Unable to allocate static info: No such device (-19)'
+ *   'CamDev@3.2-impl: open: cannot open camera 0!'
+ *   'Camera3-Device: Camera 0: initialize: Could not open camera session: Invalid argument (-22)'
+ *
+ * y la app lo muestra como 'Error de camara' / 'No se puede establecer conexion con la
+ * camara'.  Es pasajero: en la misma sesion la reapertura de las 07:32:16 si abrio y la
+ * grabacion posterior termino bien (MPEG4Writer: 'MOOV atom was written to the file',
+ * 2218317 B, 67 frames de video + 271 de audio).  Las cadenas estaticas de esa sesion eran
+ * las correctas -- aeAvailableTargetFpsRanges = [1 15] y 3280x2460 como maximo --, o sea NO
+ * es la regresion de fps documentada en CameraWrapper.cpp (bloque 'Rango de fps objetivo').
+ *
+ * Los registros de esta seccion usan __android_log_print, no trace(): trace() depende de
+ * debug.camera.trace y la reapertura puede darse justo cuando esa propiedad esta apagada.
+ *
+ * Perillas (comportamiento por defecto = el de siempre, un unico intento) ^:
+ *   /data/local/tmp/mocha-open-retries     o MOCHA_OPEN_RETRIES      intentos extra (0 = no reintentar)
+ *   /data/local/tmp/mocha-open-delay-ms    o MOCHA_OPEN_DELAY_MS     respaldo inicial en milisegundos
+ */
+static int knobInt(const char* path, const char* envName, int fallback) {
+    const char* env = getenv(envName);
+    if (env && *env) {
+        char* end = nullptr;
+        long v = strtol(env, &end, 10);
+        if (end != env) return (int)v;
+    }
+    FILE* f = fopen(path, "r");
+    if (!f) return fallback;
+    char buf[32] = {0};
+    int value = fallback;
+    if (fgets(buf, sizeof(buf), f)) {
+        char* end = nullptr;
+        long v = strtol(buf, &end, 10);
+        if (end != buf) value = (int)v;
+    }
+    fclose(f);
+    return value;
+}
+
+/* Nota siempre visible: ni debug.camera.trace ni propiedades hacen falta para verla. */
+static void openNote(const char* fmt, ...) {
+    char line[320];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    __android_log_print(ANDROID_LOG_WARN, "mocha-hal30", "%s", line);
+}
+
+/*
+ * mocha K-72, medido 2026-11-20: el blob de 2015 FILTRA el descriptor del sensor cuando su
+ * getStaticCharacteristics() falla.  Prueba directa en el dispositivo (provider pid 5945, sin
+ * ninguna sesion de camara activa):
+ *     lrwx------ 1 cameraserver audio 64 13 -> /dev/ov5693
+ * Mientras ese descriptor vive, el nodo del sensor esta tomado y toda apertura posterior sale:
+ *     'OV5693 ****  Can not open camera device: Device or resource busy'
+ *     'ERROR: Failed to power on the sensor.'
+ *     'NvPclDriverInitializeDataNvOdmSensor: NvOdm driver did not provide sensor FuseID'
+ *     'NvCameraHal3Core: getStaticInfo-- error [0x8]'
+ *     'CamDev@3.2-impl: open: cannot open camera 0!'
+ * y la camara frontal desaparece de la enumeracion ('ready with 1 camera devices').  Al matar
+ * el provider (el kernel cierra su descriptor cuando el proceso muere) la apertura siguiente si
+ * funciona: 'ardbeg_imx179_power_on finished', 'ardbeg_ov5693_power_on finished' y 'ready with
+ * 2 camera devices'.  Detalle en docs/K-72-fuga-descriptor-sensor.md
+ *
+ * Se cierten SOLO descriptores que apunten a un nodo de sensor.  Los nodos de canal
+ * (/dev/nvhost-vi*, /dev/nvhost-isp*, /dev/camera.pcl, /dev/nvmap) no se tocan: cerrarlos con
+ * una sesion viva si romperia el pipeline VI/ISP.  Cada descriptor se comprueba con readlink
+ * sobre /proc/self/fd/N; si /proc no esta disponible el barrido no se ejecuta.
+ *
+ * Perilla: /data/local/tmp/mocha-sweep-sensor-fds o MOCHA_SWEEP_SENSOR_FDS, APAGADA por
+ * defecto: sin el archivo el comportamiento es exactamente el de antes.
+ */
+static bool sweepSensorFdsEnabled() {
+    const char* env = getenv("MOCHA_SWEEP_SENSOR_FDS");
+    if (env && *env) return strtol(env, nullptr, 10) != 0;
+    FILE* f = fopen("/data/local/tmp/mocha-sweep-sensor-fds", "r");
+    if (!f) return false;
+    char buf[32] = {0};
+    bool on = false;
+    if (fgets(buf, sizeof(buf), f)) on = strtol(buf, nullptr, 10) != 0;
+    fclose(f);
+    return on;
+}
+
+/*
+ * Sensor correspondiente a cada id de camara, segun nvcamera.conf (lineas 24-25 del tree):
+ *   camera0=/dev/imx179,back,0,mono
+ *   camera1=/dev/ov5693,front,270,mono
+ * La comprobacion posterior es literal: solo se cierran descriptores que apunten a un nodo de
+ * sensor, asi que una confusion de id nunca puede cerrar el equivocado.
+ */
+static const char* sensorDeviceForName(const char* name) {
+    if (!name) return "";
+    if (name[0] == '0') return "/dev/imx179";
+    if (name[0] == '1') return "/dev/ov5693";
+    return "";
+}
+
+/*
+ * K-72, parte preventiva: si el nodo del sensor que hace falta para abrir esta camara ya esta
+ * tomado por un descriptor de este mismo proceso, la apertura del blob de 2015 va a fallar con
+ * 'Can not open camera device: Device or resource busy'.  Medido 2026-11-20: el descriptor
+ * sobrevive a las reaperturas, y con el descripto en mano la camara frontal deja de abrir
+ * ('cannot open camera 1', 'getStaticInfo-- error [0x8]') y la app muestra 'Error de camara'.
+ */
+static int preSweepSensorFor(const char* name) {
+    const char* sensor = sensorDeviceForName(name);
+    if (!sensor[0] || !sweepSensorFdsEnabled()) return 0;
+    DIR* dir = opendir("/proc/self/fd");
+    if (!dir) return 0;
+    int cerrados = 0;
+    struct dirent* ent;
+    while ((ent = readdir(dir)) != nullptr) {
+        char* fin = nullptr;
+        long fd = strtol(ent->d_name, &fin, 10);
+        if (fin == ent->d_name || fd <= 2) continue;
+        char ruta[64], destino[256];
+        snprintf(ruta, sizeof(ruta), "/proc/self/fd/%ld", fd);
+        ssize_t n = readlink(ruta, destino, sizeof(destino) - 1);
+        if (n <= 0) continue;
+        destino[n] = '\0';
+        if (strcmp(destino, sensor) != 0) continue;
+        if (::close((int)fd) == 0) {
+            openNote("K-72: el sensor %s estaba tomado por el descriptor %ld; cerrado antes de "
+                     "abrir la camara %s", destino, fd, name ? name : "?");
+            cerrados++;
+        } else {
+            openNote("K-72: close preventivo (%ld -> %s) fallo con %d", fd, destino, errno);
+        }
+    }
+    closedir(dir);
+    return cerrados;
+}
+
+static bool isSensorNodePath(const char* destino) {
+    static const char* const nombres[] = {"/dev/imx179", "/dev/ov5693", "/dev/ad5823"};
+    for (size_t i = 0; i < sizeof(nombres) / sizeof(nombres[0]); ++i) {
+        size_t n = strlen(nombres[i]);
+        /* comparamos prefijo y el caracter siguiente, para no tragar /dev/imx179x */
+        if (strncmp(destino, nombres[i], n) == 0 && (destino[n] == '\0' || destino[n] == ' '))
+            return true;
+    }
+    return false;
+}
+
+static int closeLeakedSensorFds(const char* motivo) {
+    DIR* dir = opendir("/proc/self/fd");
+    if (!dir) {
+        openNote("K-72: no se puede leer /proc/self/fd (%d); el barrido no se ejecuta", errno);
+        return 0;
+    }
+    int cerrados = 0;
+    struct dirent* ent;
+    while ((ent = readdir(dir)) != nullptr) {
+        char* fin = nullptr;
+        long fd = strtol(ent->d_name, &fin, 10);
+        if (fin == ent->d_name || fd <= 2) continue; /* no tocamos stdin/stdout/stderr */
+        char ruta[64], destino[256];
+        snprintf(ruta, sizeof(ruta), "/proc/self/fd/%ld", fd);
+        ssize_t n = readlink(ruta, destino, sizeof(destino) - 1);
+        if (n <= 0) continue;
+        destino[n] = '\0';
+        if (!isSensorNodePath(destino)) continue;
+        if (::close((int)fd) == 0) {
+            openNote("K-72: descriptor %ld (%s) cerrado por %s", fd, destino, motivo);
+            cerrados++;
+        } else {
+            openNote("K-72: close(%ld -> %s) fallo con %d", fd, destino, errno);
+        }
+    }
+    closedir(dir);
+    return cerrados;
+}
+
 int camera3_device_open(const hw_module_t* module, const char* name, hw_device_t** device) {
     if (!module || !name || !*name || !device) return -EINVAL;
     *device = nullptr;
@@ -1055,11 +1242,62 @@ int camera3_device_open(const hw_module_t* module, const char* name, hw_device_t
     }
     adapter->deviceName = name;
     hw_device_t* opened = nullptr;
+    const int extraRetries = knobInt("/data/local/tmp/mocha-open-retries", "MOCHA_OPEN_RETRIES", 0);
+    const bool sweepOn = sweepSensorFdsEnabled();
+    const bool verbose = knobInt("/data/local/tmp/mocha-open-verbose", "MOCHA_OPEN_VERBOSE", 0) != 0;
+    const int preCerrados = preSweepSensorFor(name);
+    if (verbose) {
+        openNote("K-71: apertura de la camara %s (nombre HAL '%s', sensor %s): reintentos %d, "
+                 "barrido %s, preventivo %d descriptores cerrados",
+                 name, name ? name : "(null)", sensorDeviceForName(name), extraRetries,
+                 sweepOn ? "ENCENDIDO" : "apagado", preCerrados);
+    }
+    const int delayMs = knobInt("/data/local/tmp/mocha-open-delay-ms", "MOCHA_OPEN_DELAY_MS", 250);
+    int attempts = 0;
+    struct timespec before;
+    clock_gettime(CLOCK_MONOTONIC, &before);
     result = stock->common.methods->open(&stock->common, name, &opened);
     if (result) {
-        trace("stock open of camera %s -> %d", name, result);
+        openNote("K-71: apertura del HAL de 2015 de la camara %s fallo con %d; ese codigo es lo que "
+                 "cameraserver propaga como -22 y la app muestra como error de camara",
+                 name, result);
+        const bool sweepOn = sweepSensorFdsEnabled();
+        const int intentosMax = extraRetries + (sweepOn ? 2 : 0);
+        while (attempts < intentosMax) {
+            attempts++;
+            /* poll() en lugar de usleep: no introduce dependencias nuevas y ya se usa aqui. */
+            poll(nullptr, 0, delayMs * attempts);
+            int barridos =
+                sweepOn ? closeLeakedSensorFds("K-72 (ruta de error del blob de 2015)") : 0;
+            openNote("K-71: reintento %d/%d de apertura tras %d ms; barrido de descriptores de "
+                     "sensor %s (%d cerrados)",
+                     attempts, intentosMax, delayMs * attempts,
+                     sweepOn ? "activado" : "apagado", barridos);
+            result = stock->common.methods->open(&stock->common, name, &opened);
+            if (!result) {
+                struct timespec after;
+                clock_gettime(CLOCK_MONOTONIC, &after);
+                long long spent = (after.tv_sec - before.tv_sec) * 1000LL +
+                                  (after.tv_nsec - before.tv_nsec) / 1000000LL;
+                openNote("K-71: la camara %s abrio al reintento %d (transcurrido %lld ms desde el "
+                         "primer intento); el -EBUSY del canal host1x era pasajero", name, attempts,
+                         spent);
+                break;
+            }
+        }
+    }
+    if (result) {
+        if (attempts == 0) {
+            openNote("K-71: sin reintentos activos.  Si el fallo es 'Device or resource busy' en "
+                     "el sensor, crea /data/local/tmp/mocha-sweep-sensor-fds con 1 y "
+                     "mocha-open-retries con 2: el sensor queda tomado por un descriptor "
+                     "filtrado (mocha K-72)");
+        }
+        trace("stock open of camera %s -> %d after %d retries", name, result, attempts);
         return result;
     }
+    if (attempts > 0)
+        trace("stock open of camera %s ok tras %d reintento(s)", name, attempts);
     if (!opened) return -ENODEV;
     adapter->vendor = reinterpret_cast<camera3_device_t*>(opened);
     if (opened->version != CAMERA_DEVICE_API_VERSION_3_0 || !adapter->vendor->ops ||
