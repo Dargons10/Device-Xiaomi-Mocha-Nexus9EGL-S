@@ -1168,18 +1168,20 @@ static int preSweepSensorFor(const char* name) {
     return cerrados;
 }
 
-static bool isSensorNodePath(const char* destino) {
-    static const char* const nombres[] = {"/dev/imx179", "/dev/ov5693", "/dev/ad5823"};
-    for (size_t i = 0; i < sizeof(nombres) / sizeof(nombres[0]); ++i) {
-        size_t n = strlen(nombres[i]);
-        /* comparamos prefijo y el caracter siguiente, para no tragar /dev/imx179x */
-        if (strncmp(destino, nombres[i], n) == 0 && (destino[n] == '\0' || destino[n] == ' '))
-            return true;
+static int closeLeakedSensorFds(const char* motivo, const char* sensor) {
+    /*
+     * MEDIDO 2026-11-20 con el barrido general encendido: los fallos de apertura crecian ciclo a
+     * ciclo (fallos 1,2,3,4 y 'Can not open camera device' 0,3,6,9).  Cerrar un nodo de sensor
+     * ajeno a la camara que se esta abriendo apaga el sensor de una sesion viva
+     * (ov5693_release -> ov5693_pm_wr(NVC_PWR_OFF)), o sea empeora el estado en lugar de
+     * arreglarlo.  Por eso ahora el barrido solo puede cerrar el nodo del sensor que
+     * corresponde al id que estamos intentando abrir; si el id no se reconoce, no se cierra nada.
+     * Ver docs/K-72-fuga-descriptor-sensor.md seccion 7.
+     */
+    if (!sensor || !sensor[0]) {
+        openNote("K-72: id de camara sin sensor conocido; el barrido no actua");
+        return 0;
     }
-    return false;
-}
-
-static int closeLeakedSensorFds(const char* motivo) {
     DIR* dir = opendir("/proc/self/fd");
     if (!dir) {
         openNote("K-72: no se puede leer /proc/self/fd (%d); el barrido no se ejecuta", errno);
@@ -1196,7 +1198,7 @@ static int closeLeakedSensorFds(const char* motivo) {
         ssize_t n = readlink(ruta, destino, sizeof(destino) - 1);
         if (n <= 0) continue;
         destino[n] = '\0';
-        if (!isSensorNodePath(destino)) continue;
+        if (strcmp(destino, sensor) != 0) continue; /* solo el sensor de esta camara */
         if (::close((int)fd) == 0) {
             openNote("K-72: descriptor %ld (%s) cerrado por %s", fd, destino, motivo);
             cerrados++;
@@ -1267,8 +1269,9 @@ int camera3_device_open(const hw_module_t* module, const char* name, hw_device_t
             attempts++;
             /* poll() en lugar de usleep: no introduce dependencias nuevas y ya se usa aqui. */
             poll(nullptr, 0, delayMs * attempts);
-            int barridos =
-                sweepOn ? closeLeakedSensorFds("K-72 (ruta de error del blob de 2015)") : 0;
+            int barridos = sweepOn ? closeLeakedSensorFds("K-72 (ruta de error del blob de 2015)",
+                                                          sensorDeviceForName(name))
+                                   : 0;
             openNote("K-71: reintento %d/%d de apertura tras %d ms; barrido de descriptores de "
                      "sensor %s (%d cerrados)",
                      attempts, intentosMax, delayMs * attempts,
