@@ -154,11 +154,40 @@ static bool traceEnabled();
 static void trace(const char* fmt, ...);
 
 /*
- * Advertencias incondicionales, visibles sin 'debug.camera.trace'.  Declaradas aqui porque la clase
- * de sesion (initialize/configure) vive bastante antes de su definicion.
+ * Advertencias incondicionales, visibles sin 'debug.camera.trace', y lectura de perillas.  Definidas
+ * aqui, una sola vez y antes de cualquier uso, porque la clase de sesion (initialize/configure) vive
+ * bastante antes de donde estaban originalmente.  Dejarlas declaradas y definidas por separado hacia
+ * ambiguedad de llamada (error 'call to openNote is ambiguous' del clang r416183b1).
  */
-static void openNote(const char* fmt, ...);
-static int knobInt(const char* path, const char* envName, int fallback);
+static int knobInt(const char* path, const char* envName, int fallback) {
+    const char* env = getenv(envName);
+    if (env && *env) {
+        char* end = nullptr;
+        long v = strtol(env, &end, 10);
+        if (end != env) return (int)v;
+    }
+    FILE* f = fopen(path, "r");
+    if (!f) return fallback;
+    char buf[32] = {0};
+    int value = fallback;
+    if (fgets(buf, sizeof(buf), f)) {
+        char* end = nullptr;
+        long v = strtol(buf, &end, 10);
+        if (end != buf) value = (int)v;
+    }
+    fclose(f);
+    return value;
+}
+
+/* Nota siempre visible: ni debug.camera.trace ni propiedades hacen falta para verla. */
+static void openNote(const char* fmt, ...) {
+    char line[320];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    __android_log_print(ANDROID_LOG_WARN, "mocha-hal30", "%s", line);
+}
 
 unsigned gPeeks = 0;
 unsigned char gLastSig[16];
@@ -535,6 +564,17 @@ public:
         }
 
         int result = vendor->ops->configure_streams(vendor, &legacyConfig);
+        if (result) {
+            ALOGE("Stock configure_streams failed: %d", result);
+            openNote("K-75: configure_streams del vendor devolvio %d (%u streams, %u blob)",
+                     result, legacyConfig.num_streams, jpeg);
+            trace("configure_streams -> %d (%u streams, %u processed, %u blob)",
+                  result, legacyConfig.num_streams, processed, jpeg);
+            for (auto& item : next) failedStreams.push_back(std::move(item.second));
+            std::lock_guard<std::mutex> stateLock(stateMutex);
+            fatal = true;
+            return result;
+        }
 
         for (unsigned i = 0; i < legacyConfig.num_streams; ++i) {
             camera3_stream_t* v = legacyConfig.streams[i];
@@ -553,16 +593,6 @@ public:
                 openNote("K-75: blob reestablecido a dataspace 0x%x (el que pidio el framework)",
                          v->data_space);
             }
-        }
-        int result = vendor->ops->configure_streams(vendor, &legacyConfig);
-        if (result) {
-            ALOGE("Stock configure_streams failed: %d", result);
-            trace("configure_streams -> %d (%u streams, %u processed, %u blob)",
-                  result, legacyConfig.num_streams, processed, jpeg);
-            for (auto& item : next) failedStreams.push_back(std::move(item.second));
-            std::lock_guard<std::mutex> stateLock(stateMutex);
-            fatal = true;
-            return result;
         }
         for (auto& item : next) {
             Stream& stream = *item.second;
@@ -1135,35 +1165,8 @@ camera3_device_ops_t operations = {
  *   /data/local/tmp/mocha-open-retries     o MOCHA_OPEN_RETRIES      intentos extra (0 = no reintentar)
  *   /data/local/tmp/mocha-open-delay-ms    o MOCHA_OPEN_DELAY_MS     respaldo inicial en milisegundos
  */
-static int knobInt(const char* path, const char* envName, int fallback) {
-    const char* env = getenv(envName);
-    if (env && *env) {
-        char* end = nullptr;
-        long v = strtol(env, &end, 10);
-        if (end != env) return (int)v;
-    }
-    FILE* f = fopen(path, "r");
-    if (!f) return fallback;
-    char buf[32] = {0};
-    int value = fallback;
-    if (fgets(buf, sizeof(buf), f)) {
-        char* end = nullptr;
-        long v = strtol(buf, &end, 10);
-        if (end != buf) value = (int)v;
-    }
-    fclose(f);
-    return value;
-}
-
-/* Nota siempre visible: ni debug.camera.trace ni propiedades hacen falta para verla. */
-static void openNote(const char* fmt, ...) {
-    char line[320];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(line, sizeof(line), fmt, ap);
-    va_end(ap);
-    __android_log_print(ANDROID_LOG_WARN, "mocha-hal30", "%s", line);
-}
+/* knobInt() y openNote() se definen ahora cerca de trace(), mas arriba: una sola declaracion para
+ * todo el fichero.  A partir de aqui solo se usan. */
 
 /*
  * mocha K-72, medido 2026-11-20: el blob de 2015 FILTRA el descriptor del sensor cuando su
