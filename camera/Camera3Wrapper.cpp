@@ -153,6 +153,13 @@ static bool waitFenceShort(int fd, int ms) {
 static bool traceEnabled();
 static void trace(const char* fmt, ...);
 
+/*
+ * Advertencias incondicionales, visibles sin 'debug.camera.trace'.  Declaradas aqui porque la clase
+ * de sesion (initialize/configure) vive bastante antes de su definicion.
+ */
+static void openNote(const char* fmt, ...);
+static int knobInt(const char* path, const char* envName, int fallback);
+
 unsigned gPeeks = 0;
 unsigned char gLastSig[16];
 
@@ -399,10 +406,26 @@ public:
     int initialize(const camera3_callback_ops_t* client) {
         if (!client || !client->process_capture_result || !client->notify) return -EINVAL;
         std::lock_guard<std::mutex> requestLock(requestMutex);
-        if (clientCallbacks) return -ENOSYS;
+        if (clientCallbacks) {
+            /*
+             * mocha K-75: este es el UNICO -ENOSYS de todo el envoltorio, y el puente HIDL lo
+             * convierte en Status::OPERATION_NOT_SUPPORTED
+             * (hardware/interfaces/camera/device/3.2/default/CameraDevice.cpp:92), que
+             * libcameraservice devuelve como -38 'Function not implemented'.  Medido 2026-11-20 en
+             * camera.log: 'Camera3-Device: configureStreamsLocked: Unable to configure streams with
+             * HAL: Function not implemented (-38)' sin ninguna linea nuestra de configure, o sea la
+             * reconfiguracion del video no llego a configure.  Queda registrado para descartarlo o
+             * confirmarlo en la proxima sesion de video.
+             */
+            openNote("K-75: initialize pedido con una sesion viva; devuelvo -ENOSYS (-38)");
+            return -ENOSYS;
+        }
         clientCallbacks = client;
         int result = vendor->ops->initialize(vendor, &callbacks.ops);
-        if (result) clientCallbacks = nullptr;
+        if (result) {
+            clientCallbacks = nullptr;
+            openNote("K-75: initialize del vendor fallo con %d", result);
+        }
         return result;
     }
 
@@ -471,6 +494,66 @@ public:
         camera3_stream_configuration_t legacyConfig = {};
         legacyConfig.num_streams = static_cast<uint32_t>(vendorStreams.size());
         legacyConfig.streams = vendorStreams.data();
+
+        /*
+         * mocha K-75, medido 2026-11-20 (camera.log, sesion de video de las 15:13):
+         *   15:13:50.997 Camera3-Device: configureStreams: Stream 1: accepting BLOB dataspace
+         *                override 146931712 -> 257
+         *   15:13:58.741 Camera3-Device: configureStreamsLocked: Blob dataSpace 257 not supported
+         *   15:13:58.741 Camera3-Device: ... Unable to configure streams with HAL: Function not
+         *                implemented (-38)
+         *   15:13:59.678 CameraSource: Failed to start recording, received error: Function not
+         *                implemented (-38)   ->  MPEG4Writer reset(), 0 chunks, 0 bytes
+         * 146931712 es HAL_DATASPACE_V0_JFIF (system/core/libsystem/include/system/
+         * graphics-base-v1.0.h:85), o sea el dataspace CORRECTO que traia el stream JPEG del
+         * framework.  257 (0x101) es lo que devolvio la sesion HAL desde el lado de NVIDIA: el blob
+         * de 2015 escribe en las estructuras de stream que le pasamos (ver el comentario de 'priv'
+         * mas abajo: lee campos que en HAL3.2 no estan donde el espera) y aqui el danificado cae en
+         * data_space.  AOSP lo acepta como 'legacy quirk' (Camera3Device.cpp:3522-3532) y despues el
+         * propio AOSP no lo reconoce (Camera3Device.cpp:2705-2718), que es el aviso de arriba; y el
+         * escritor de video se queda sin tamano de buffer JPEG.
+         *
+ * Solucion: no dejamos pasar dataspace basura.  Para cada stream BLOB comparamos con lo que el
+         * propio framework pedía; si el vendor lo ha alterado, se reponen los campos originales
+         * (data_space, y format/width/height/usage/max_buffers por si tambien los tocó) ANTES de
+         * que AOSP los lea.  Escribimos solo en nuestro stream del vendor; la estructura del cliente
+         * la toca AOSP.
+         *
+         * Perilla /data/local/tmp/mocha-blob-check (o MOCHA_BLOB_CHECK): valor 1 = reponer
+         * (comportamiento nuevo), valor 0 = solo registrar y no tocar.  Si el archivo no existe el
+         * comportamiento es el anterior (registrar y no tocar).
+         */
+        const int blobCheck = knobInt("/data/local/tmp/mocha-blob-check", "MOCHA_BLOB_CHECK", 0);
+        openNote("K-75: configure pide %u streams (procesados %u, blob %u) -> %u al vendor; blob-check %s",
+                 config->num_streams, processed, jpeg, legacyConfig.num_streams,
+                 blobCheck ? "1 (reponer campos alterados)" : "0 (solo registrar)");
+        for (unsigned i = 0; i < config->num_streams; ++i) {
+            camera3_stream_t* c = config->streams[i];
+            openNote("K-75:   stream %u: %ux%u format 0x%x dataspace 0x%x usage 0x%x tipo %d max_buf %u",
+                     i, c->width, c->height, c->format, c->data_space, c->usage, c->stream_type,
+                     c->max_buffers);
+        }
+
+        int result = vendor->ops->configure_streams(vendor, &legacyConfig);
+
+        for (unsigned i = 0; i < legacyConfig.num_streams; ++i) {
+            camera3_stream_t* v = legacyConfig.streams[i];
+            camera3_stream_t* origen = config->streams[i];
+            if (v->format != HAL_PIXEL_FORMAT_BLOB) continue;
+            if (v->data_space == origen->data_space) continue;
+            openNote("K-75: el vendor ALTERO el blob: dataspace 0x%x -> 0x%x (stream %ux%u); "
+                     "formato 0x%x -> 0x%x", origen->data_space, v->data_space, v->width, v->height,
+                     origen->format, v->format);
+            if (blobCheck) {
+                v->data_space = origen->data_space;
+                v->format = origen->format;
+                v->width = origen->width;
+                v->height = origen->height;
+                v->usage = origen->usage;
+                openNote("K-75: blob reestablecido a dataspace 0x%x (el que pidio el framework)",
+                         v->data_space);
+            }
+        }
         int result = vendor->ops->configure_streams(vendor, &legacyConfig);
         if (result) {
             ALOGE("Stock configure_streams failed: %d", result);
