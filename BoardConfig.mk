@@ -135,7 +135,19 @@ EXTENDED_FONT_FOOTPRINT := true
 #   PM: suspend entry ... / Wake39 for irq=52 / Restarting tasks ... done. / PM: suspend exit).
 # Es el knob que el propio driver documenta (MODULE_PARM_DESC(enabled, "enable wakelock when
 # VBUS present")). Si alguna vez hiciera falta revertirlo: quitar este parametro del cmdline.
-BOARD_KERNEL_CMDLINE := vpr_resize androidboot.selinux=permissive vmalloc=400M otg_wakelock.enabled=0
+# K-70: otg_wakelock.enabled=1.  Con '=0' (lo que habia) el modulo arranca con
+# /sys/module/otg_wakelock/parameters/enabled = N, el SoC entra en suspension durante la
+# sesion de camara/grabacion y la tableta desaparece del bus USB (K-70: habia que
+# desenchufar y volver a enchufar el cable a mano).  Puesto que el kernel se compila con
+# CONFIG_CMDLINE="", la unica via permanente es esta linea: el valor que se pone en tiempo de
+# ejecucion ('echo Y > /sys/module/otg_wakelock/parameters/enabled') se pierde al reiniciar.
+# K-76b: mocha_k76b=1 arma el rescate del canal exclusivo huerfano de VI/ISP desde el arranque.
+# El canal es exclusivo (num_channels=1, exclusive=true) y lo deja mapeado el probe de
+# imx179/ov5693; cuando un trabajo del CDMA vence ('cdma_timeout_handler: timeout: 22 (vi.1_2)'),
+# la referencia no se devuelve y todo open de camara devuelve -EBUSY ('failed to map channel,
+# error: -16') -> 'initialize: -22' -> 'no se puede establecer conexion con la camara', y solo
+# lo limpiaba un reinicio.  El boton sysfs sigue disponible: /sys/kernel/mocha_k76b/enable.
+BOARD_KERNEL_CMDLINE := vpr_resize androidboot.selinux=permissive vmalloc=400M otg_wakelock.enabled=1 mocha_k76b=1
 BOARD_KERNEL_BASE := 0x10000000
 BOARD_RAMDISK_OFFSET := 0x02000000
 BOARD_KERNEL_PAGESIZE := 2048
