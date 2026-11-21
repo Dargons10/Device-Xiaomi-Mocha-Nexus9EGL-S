@@ -249,14 +249,21 @@ PRODUCT_COPY_FILES += \
 # and after setting the property to 1 the encoder probe passes and the recorder reaches the camera
 # source.  CCodec (codec2) is therefore left at its default so the software codecs declared by
 # media_codecs_google_video.xml are used.
-# 2026-11-20: 'debug.stagefright.ccodec' se fija aqui de forma permanente.  Medido en el
-# dispositivo: con 0 no hay ningun host de componentes en Android 12 (no se compilan
-# libOmxCore/libOmxVenc/libOmxVdec) y la grabacion falla con 'MOCHA-REC: setupMediaSource
-# err=-19' y 'E/MediaRecorder: start failed: -19' (-ENODEV); con 1 el probe del encoder pasa y
-# el grabador llega a la fuente de camara.  Hasta ahora solo se habia puesto en runtime con
-# setprop, asi que cada arranque nuevo lo deshacia y el video volvia a fallar.
+# 2026-11-21: 'debug.stagefright.ccodec' se fija aqui en 4, NO en 1.  Leido el codigo en
+# frameworks/av/media/codec2/sfplugin/Codec2InfoBuilder.cpp:302-327: la propiedad admite 0..4 y el
+# valor que realmente se usa cuando la propiedad NO esta puesta es 4 ('All components are available
+# with their normal ranks'), mientras que 1 coloca primero los 'c2.android.' de audio y empuja al
+# FINAL de la clasificacion todos los '.avc.decoder' y '.avc.encoder'.  Medido en la tableta con la
+# grabacion funcionando: 'getprop debug.stagefright.ccodec' esta VACIO (o sea, opcion 4) y aun asi
+# el clip salio h264 Constrained Baseline 1280x720 + aac LC 48 kHz estereo con moov valido
+# (VID_20261121_091725.mp4, 6630715 B, 8,48 s).  Lo que de verdad arreglo la grabacion fue el
+# media_codecs.xml limpio (fueras las entradas muertas de OMX.Nvidia; md5 instalado 540becf4210f =
+# el que produce la compilacion), no esta propiedad.  Se pone 4 de forma explicita para reproducir
+# la configuracion verificada y para que un cambio de defecto aguas arriba no nos mueva a 1.
+# Ademas 'find out/target/product/mocha -name libOmxCore.so' devuelve 0: en Android 12 no existe el
+# host OMX, asi que cualquier valor que dependa de OMX queda descartado.
 PRODUCT_PROPERTY_OVERRIDES += \
-    debug.stagefright.ccodec=1 \
+    debug.stagefright.ccodec=4 \
     debug.stagefright.c2-poolmask=0x50000
 
 # Overlay
