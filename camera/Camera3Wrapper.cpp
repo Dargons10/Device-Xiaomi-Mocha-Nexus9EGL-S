@@ -867,7 +867,7 @@ public:
          * Perilla en milisegundos; 0 = APAGADO (comportamiento actual, cero riesgo) ✓. */
         const int desacoplar = knobInt("/data/local/tmp/mocha-close-detach-ms",
                                        "MOCHA_CLOSE_DETACH_MS", 0);
-        if (drained == -ETIMEDOUT && desacoplar > 0 && vendor != nullptr) {
+        if ((drained == -ETIMEDOUT || fatal) && desacoplar > 0 && vendor != nullptr) {  // K-83: fatal ✓ también (medido: el drain peta en flush, no en close ✓)
             camera3_device_t* moribundo = vendor;
             vendor = nullptr;
             const std::string nombre = deviceName;
