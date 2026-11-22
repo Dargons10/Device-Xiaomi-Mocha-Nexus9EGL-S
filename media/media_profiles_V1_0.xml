@@ -48,9 +48,9 @@
 
     <EncoderProfile quality="high" fileFormat="mp4" duration="30">
       <Video codec="h264"
-             bitRate="8000000"
-             width="1280"
-             height="720"
+             bitRate="13000000"
+             width="1920"
+             height="1080"
              frameRate="15" />
 
       <Audio codec="aac"
@@ -91,9 +91,9 @@
 
     <EncoderProfile quality="timelapsehigh" fileFormat="mp4" duration="30">
       <Video codec="h264"
-             bitRate="8000000"
-             width="1280"
-             height="720"
+             bitRate="13000000"
+             width="1920"
+             height="1080"
              frameRate="15" />
 
       <!--
@@ -127,6 +127,37 @@
     <ImageEncoding quality="80" />
     <ImageEncoding quality="70" />
     <ImageDecoding memCap="20000000" />
+
+    <!-- 1080p aniadido 2026-11-22 (medido): la HAL ya anuncia 1920x1080 como flujo de video en
+         android.scaler.availableStreamConfigurations (formatos 34/35/33, OUTPUT) y el sensor IMX179
+         tiene su propio modo de registros mode_1920x1080 en imx179.c, asi que 1080p es nativo.  El
+         techo de fotogramas sigue siendo el del modo de 8 MP que pide el PCL (12 fps reales de los
+         15 anunciados), por eso se mantienen los perfiles de 720p como reserva. -->
+    <EncoderProfile quality="1080p" fileFormat="mp4" duration="30">
+      <Video codec="h264"
+             bitRate="13000000"
+             width="1920"
+             height="1080"
+             frameRate="15" />
+
+      <Audio codec="aac"
+             bitRate="96000"
+             sampleRate="48000"
+             channels="2" />
+    </EncoderProfile>
+
+    <EncoderProfile quality="timelapse1080p" fileFormat="mp4" duration="30">
+      <Video codec="h264"
+             bitRate="13000000"
+             width="1920"
+             height="1080"
+             frameRate="15" />
+
+      <Audio codec="aac"
+             bitRate="96000"
+             sampleRate="48000"
+             channels="2" />
+    </EncoderProfile>
 
   </CamcorderProfiles>
 
@@ -148,9 +179,9 @@
 
     <EncoderProfile quality="high" fileFormat="mp4" duration="30">
       <Video codec="h264"
-             bitRate="8000000"
-             width="1280"
-             height="720"
+             bitRate="13000000"
+             width="1920"
+             height="1080"
              frameRate="15" />
 
       <Audio codec="aac"
@@ -178,9 +209,9 @@
 
     <EncoderProfile quality="timelapsehigh" fileFormat="mp4" duration="30">
       <Video codec="h264"
-             bitRate="8000000"
-             width="1280"
-             height="720"
+             bitRate="13000000"
+             width="1920"
+             height="1080"
              frameRate="15" />
 
       <!--
@@ -227,6 +258,37 @@
     <ImageEncoding quality="80" />
     <ImageEncoding quality="70" />
     <ImageDecoding memCap="20000000" />
+
+    <!-- 1080p aniadido 2026-11-22 (medido): la HAL ya anuncia 1920x1080 como flujo de video en
+         android.scaler.availableStreamConfigurations (formatos 34/35/33, OUTPUT) y el sensor IMX179
+         tiene su propio modo de registros mode_1920x1080 en imx179.c, asi que 1080p es nativo.  El
+         techo de fotogramas sigue siendo el del modo de 8 MP que pide el PCL (12 fps reales de los
+         15 anunciados), por eso se mantienen los perfiles de 720p como reserva. -->
+    <EncoderProfile quality="1080p" fileFormat="mp4" duration="30">
+      <Video codec="h264"
+             bitRate="13000000"
+             width="1920"
+             height="1080"
+             frameRate="15" />
+
+      <Audio codec="aac"
+             bitRate="96000"
+             sampleRate="48000"
+             channels="2" />
+    </EncoderProfile>
+
+    <EncoderProfile quality="timelapse1080p" fileFormat="mp4" duration="30">
+      <Video codec="h264"
+             bitRate="13000000"
+             width="1920"
+             height="1080"
+             frameRate="15" />
+
+      <Audio codec="aac"
+             bitRate="96000"
+             sampleRate="48000"
+             channels="2" />
+    </EncoderProfile>
 
   </CamcorderProfiles>
 
