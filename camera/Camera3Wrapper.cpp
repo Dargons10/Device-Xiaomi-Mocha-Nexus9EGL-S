@@ -21,6 +21,7 @@
 #include <dirent.h>
 #include <poll.h>
 #include <set>
+#include <thread>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -854,6 +855,36 @@ public:
             std::lock_guard<std::mutex> stateLock(stateMutex);
             trace("adapter: drain previa al cierre de camera %s -> %d (inflight=%zu)",
                   deviceName.c_str(), drained, frames.size());
+        }
+        /* mocha K-83, medido 2026-11-22 con el camera.log del usuario ✓.  Si el drain revienta, el
+         * close() del HAL stock de 2015 puede tardar decenas de segundos (destruccion del Vi/Isp
+         * esperando fences: 'Timed out draining 1 stock capture requests ✓' x3 y 'disconnectImpl:
+         * Shutting down in an error state ✓').  CameraService hace ese close() con mServiceLock
+         * cogido, y mientras lo tiene cualquier connect nuevo se rinde con 'Too many other clients
+         * connecting ✓' -> el cartel de 'Error de camara ✓' al reabrir tras segundo plano ✓.
+         * Con la perilla puesta se desacopla el close() stock a un hilo y respondemos ya: el
+         * framework suelta el lock y la reapertura entra (K-82 y K-84 completan el arreglo).
+         * Perilla en milisegundos; 0 = APAGADO (comportamiento actual, cero riesgo) ✓. */
+        const int desacoplar = knobInt("/data/local/tmp/mocha-close-detach-ms",
+                                       "MOCHA_CLOSE_DETACH_MS", 0);
+        if (drained == -ETIMEDOUT && desacoplar > 0 && vendor != nullptr) {
+            camera3_device_t* moribundo = vendor;
+            vendor = nullptr;
+            const std::string nombre = deviceName;
+            std::thread([moribundo, nombre] {
+                auto t0 = std::chrono::steady_clock::now();
+                moribundo->common.close(&moribundo->common);
+                long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t0).count();
+                ALOGI("adapter: close stock de camera %s terminado en hilo tras %lld ms (K-83 ✓)",
+                      nombre.c_str(), ms);
+            }).detach();
+            trace("adapter: close stock de camera %s DESACPLADO a un hilo (drain -> %d, perilla %d ms) ✓",
+                  deviceName.c_str(), drained, desacoplar);
+            frames.clear();
+            streams.clear();
+            failedStreams.clear();
+            return 0;
         }
         int result = vendor ? vendor->common.close(&vendor->common) : 0;
         trace("adapter for camera %s closed (%d)", deviceName.c_str(), result);

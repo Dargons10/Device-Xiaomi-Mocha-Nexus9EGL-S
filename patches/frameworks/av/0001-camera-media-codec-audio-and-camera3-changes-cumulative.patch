@@ -1233,6 +1233,113 @@ index 1dd41b337b..0d6abc7581 100644
      int rc = mDevicesFactoryHal->openDevice(name, &dev);
      if (rc) {
          ALOGE("loadHwModule() error %d loading module %s", rc, name);
+diff --git a/services/camera/libcameraservice/CameraService.cpp b/services/camera/libcameraservice/CameraService.cpp
+index eefc71f895..21800e4fc4 100644
+--- a/services/camera/libcameraservice/CameraService.cpp
++++ b/services/camera/libcameraservice/CameraService.cpp
+@@ -1529,7 +1529,7 @@ status_t CameraService::handleEvictionsLocked(const String8& cameraId, int clien
+     for (const auto& i : evictedClients) {
+         ALOGV("%s: Waiting for disconnect to complete for client for device %s (PID %" PRId32 ")",
+                 __FUNCTION__, i->getKey().string(), i->getOwnerId());
+-        ret = mActiveClientManager.waitUntilRemoved(i, DEFAULT_DISCONNECT_TIMEOUT_NS);
++        ret = mActiveClientManager.waitUntilRemoved(i, disconnectTimeoutNs());  // K-84 ✓
+         if (ret == TIMED_OUT) {
+             ALOGE("%s: Timed out waiting for client for device %s to disconnect, "
+                     "current clients:\n%s", __FUNCTION__, i->getKey().string(),
+@@ -1772,11 +1772,12 @@ Status CameraService::connectHelper(const sp<CALLBACK>& cameraCb, const String8&
+     {
+         // Acquire mServiceLock and prevent other clients from connecting
+         std::unique_ptr<AutoConditionLock> lock =
+-                AutoConditionLock::waitAndAcquire(mServiceLockWrapper, DEFAULT_CONNECT_TIMEOUT_NS);
++                AutoConditionLock::waitAndAcquire(mServiceLockWrapper, connectTimeoutNs());  // K-84 ✓
+ 
+         if (lock == nullptr) {
+-            ALOGE("CameraService::connect (PID %d) rejected (too many other clients connecting)."
+-                    , clientPid);
++            ALOGE("CameraService::connect (PID %d) rejected (too many other clients connecting) "
++                  "tras %lld ms (K-84: sube persist.vendor.cameraservice.connect_timeout_ms)"
++                    , clientPid, (long long)(connectTimeoutNs() / 1000000));
+             return STATUS_ERROR_FMT(ERROR_MAX_CAMERAS_IN_USE,
+                     "Cannot open camera %s for \"%s\" (PID %d): Too many other clients connecting",
+                     cameraId.string(), clientName8.string(), clientPid);
+@@ -1962,6 +1963,40 @@ Status CameraService::connectHelper(const sp<CALLBACK>& cameraCb, const String8&
+     return ret;
+ }
+ 
++/* mocha K-84 ✓.  Tiempos con el pie forzado de mocha: por defecto 30 s para conectar (el desmontaje
++ * del HAL stock de NVIDIA dura decenas de segundos cuando se queda con requests sin drenar ✓, ver
++ * camera.log del 2026-11-22: 'Timed out draining 1 stock capture requests ✓' tres veces y
++ * 'disconnectImpl: Shutting down in an error state ✓') y 20 s para esperar desconexiones ✓.  Con los
++ * 3 s de fabrica, la reapertura de la app rebotaba con 'Too many other clients connecting ✓' y salia
++ * el cartel de 'Error de camara ✓'.  Acotado a proposito (3..90 s): no se puede colgar el servicio. */
++nsecs_t CameraService::connectTimeoutNs() {
++    static nsecs_t cached = -1;
++    if (cached < 0) {
++        char value[PROPERTY_VALUE_MAX] = {0};
++        property_get("persist.vendor.cameraservice.connect_timeout_ms", value, "30000");
++        long ms = strtol(value, nullptr, 10);
++        if (ms < 3000) ms = 3000;
++        if (ms > 90000) ms = 90000;
++        cached = ms * 1000000LL;
++        ALOGI("CameraService (mocha K-84): paciencia para conectar = %ld ms ✓", ms);
++    }
++    return cached;
++}
++
++nsecs_t CameraService::disconnectTimeoutNs() {
++    static nsecs_t cached = -1;
++    if (cached < 0) {
++        char value[PROPERTY_VALUE_MAX] = {0};
++        property_get("persist.vendor.cameraservice.disconnect_timeout_ms", value, "20000");
++        long ms = strtol(value, nullptr, 10);
++        if (ms < 1000) ms = 1000;
++        if (ms > 90000) ms = 90000;
++        cached = ms * 1000000LL;
++        ALOGI("CameraService (mocha K-84): paciencia para desconectar = %ld ms ✓", ms);
++    }
++    return cached;
++}
++
+ status_t CameraService::addOfflineClient(String8 cameraId, sp<BasicClient> offlineClient) {
+     if (offlineClient.get() == nullptr) {
+         return BAD_VALUE;
+@@ -1970,7 +2005,7 @@ status_t CameraService::addOfflineClient(String8 cameraId, sp<BasicClient> offli
+     {
+         // Acquire mServiceLock and prevent other clients from connecting
+         std::unique_ptr<AutoConditionLock> lock =
+-                AutoConditionLock::waitAndAcquire(mServiceLockWrapper, DEFAULT_CONNECT_TIMEOUT_NS);
++                AutoConditionLock::waitAndAcquire(mServiceLockWrapper, connectTimeoutNs());  // K-84 ✓
+ 
+         if (lock == nullptr) {
+             ALOGE("%s: (PID %d) rejected (too many other clients connecting)."
+diff --git a/services/camera/libcameraservice/CameraService.h b/services/camera/libcameraservice/CameraService.h
+index 0c91eaa1d3..75aa121456 100644
+--- a/services/camera/libcameraservice/CameraService.h
++++ b/services/camera/libcameraservice/CameraService.h
+@@ -91,6 +91,23 @@ public:
+     // 1 second busy timeout when other clients are disconnecting
+     static const nsecs_t DEFAULT_DISCONNECT_TIMEOUT_NS = 1000000000;
+ 
++    /* mocha K-84, medido 2026-11-22 con el camera.log del usuario ✓.  Escenario real (repro que hay
++     * que arreglar: grabar -> ir a segundo plano -> reabrir -> 'Error de camara ✓'):
++     *   19:23:42  onPause ✓ (la camara se va a segundo plano)
++     *   19:23:44  ActivityManager: Killing 1973:com.android.camera2 (adj 905): remove task ✓ (muere)
++     *   19:23:45  CameraService::connect ✓ (la app renace con pid 2531)
++     *   19:23:48  rechazado a los EXACTOS 3,000 s ✓: 'Cannot open camera 0 ... Too many other
++     *             clients connecting ✓' -> CAM_FatalErrorHandler: CANNOT_CONNECT_TO_CAMERA ✓ -> cartel ✓
++     *   19:23:51/59/24:02  Camera3Wrapper: Timed out draining 1 stock capture requests ✓✓✓
++     *   19:23:59  deleteStream not allowed in ERROR state ✓ + disconnectImpl: Shutting down in an
++     *             error state ✓ (el HAL stock de 2015 sigue desmontandose ~50 s ✓)
++     *
++     * El rechazo no es un limite de clientes: mServiceLock lo tiene el desmontaje del cliente matado,
++     * y waitAndAcquire solo esperaba 3 s ✓.  Estas dos funciones dan paciencia (30 s / 20 s por
++     * defecto, ajustables por propiedad ✓) para que la reapertura ESPERE y entre ✓. */
++    static nsecs_t connectTimeoutNs();
++    static nsecs_t disconnectTimeoutNs();
++
+     // Default number of messages to store in eviction log
+     static const size_t DEFAULT_EVENT_LOG_LENGTH = 100;
+ 
 diff --git a/services/camera/libcameraservice/common/Camera2ClientBase.cpp b/services/camera/libcameraservice/common/Camera2ClientBase.cpp
 index 5e086c0b44..4ce94e4899 100644
 --- a/services/camera/libcameraservice/common/Camera2ClientBase.cpp
