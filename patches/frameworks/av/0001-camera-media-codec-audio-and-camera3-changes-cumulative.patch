@@ -1234,7 +1234,7 @@ index 1dd41b337b..0d6abc7581 100644
      if (rc) {
          ALOGE("loadHwModule() error %d loading module %s", rc, name);
 diff --git a/services/camera/libcameraservice/CameraService.cpp b/services/camera/libcameraservice/CameraService.cpp
-index eefc71f895..528c76b758 100644
+index eefc71f895..b007d46d05 100644
 --- a/services/camera/libcameraservice/CameraService.cpp
 +++ b/services/camera/libcameraservice/CameraService.cpp
 @@ -1529,7 +1529,7 @@ status_t CameraService::handleEvictionsLocked(const String8& cameraId, int clien
@@ -1276,7 +1276,7 @@ index eefc71f895..528c76b758 100644
 +    static nsecs_t cached = -1;
 +    if (cached < 0) {
 +        char value[PROPERTY_VALUE_MAX] = {0};
-+        property_get("persist.vendor.cameraservice.connect_timeout_ms", value, "60000");  // K-84: MEDIDO 22-11-2026 20:29-20:34, el desmontaje del HAL supera los 30 s ✓✓
++        property_get("persist.vendor.cameraservice.connect_timeout_ms", value, "10000");  // K-84: MEDIDO: con 30-60 s de paciencia el atraco era de ~2 min ✓; con la K-87 el fallo es rapido ✓
 +        long ms = strtol(value, nullptr, 10);
 +        if (ms < 3000) ms = 3000;
 +        if (ms > 90000) ms = 90000;
@@ -1341,7 +1341,7 @@ index 0c91eaa1d3..75aa121456 100644
      static const size_t DEFAULT_EVENT_LOG_LENGTH = 100;
  
 diff --git a/services/camera/libcameraservice/common/Camera2ClientBase.cpp b/services/camera/libcameraservice/common/Camera2ClientBase.cpp
-index 5e086c0b44..b77466f18d 100644
+index 5e086c0b44..9304c8a578 100644
 --- a/services/camera/libcameraservice/common/Camera2ClientBase.cpp
 +++ b/services/camera/libcameraservice/common/Camera2ClientBase.cpp
 @@ -19,6 +19,7 @@
@@ -1386,7 +1386,7 @@ index 5e086c0b44..b77466f18d 100644
 +    static int cacheado = -1;
 +    if (cacheado < 0) {
 +        char valor[PROPERTY_VALUE_MAX] = {0};
-+        property_get("persist.vendor.cameraservice.init_retries", valor, "25");  // K-85: 25 x 2 s = 50 s ✓
++        property_get("persist.vendor.cameraservice.init_retries", valor, "5");  // K-85: 5 x 1,5 s = ~7 s ✓ (con la K-87 el arreglo es recrear, no esperar ✓)
 +        long v = strtol(valor, nullptr, 10);
 +        if (v < 1) v = 1;
 +        if (v > 40) v = 40;  // K-85: techo 40 (medido: la HAL queda -22 mas de 20 s ✓)
@@ -1401,7 +1401,7 @@ index 5e086c0b44..b77466f18d 100644
 +    static useconds_t cacheado = 0;
 +    if (cacheado == 0) {
 +        char valor[PROPERTY_VALUE_MAX] = {0};
-+        property_get("persist.vendor.cameraservice.init_retry_pause_ms", valor, "2000");
++        property_get("persist.vendor.cameraservice.init_retry_pause_ms", valor, "1500");  // K-87: pausas cortas, fallo rapido ✓
 +        long v = strtol(valor, nullptr, 10);
 +        if (v < 500) v = 500;
 +        if (v * 1000 > (long)kMochaPausaMax) v = kMochaPausaMax / 1000;

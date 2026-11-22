@@ -22,6 +22,8 @@
 #include <poll.h>
 #include <set>
 #include <thread>
+#include <future>
+#include <atomic>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -451,10 +453,61 @@ public:
             return -ENOSYS;
         }
         clientCallbacks = client;
-        int result = vendor->ops->initialize(vendor, &callbacks.ops);
+        /* mocha K-87, medido 2026-11-22 ✓✓✓: en la reapertura tras grabar y morir la app, el
+         * initialize() del blob de NVIDIA de 2015 NO REGRESA: esta bloqueado minutos ✓ (banco
+         * k85_banco_v4 con la K-86 puesta: 203 s sin abrir, CERO 'initialize fallo ✓' y CERO
+         * rechazos ✓, o sea el connect ✓ del app estaba metido dentro del initialize ✓ del vendor).
+         * Por eso la K-86 (que actua en FALLO ✓) no llegaba a disparar nunca, y la paciencia de
+         * K-84/K-85 solo convertia un fallo rapido en un atraco de ~2 min ✓.
+         * K-87: se pide el initialize del vendor con un PRESUPUESTO acotado ✓; si no regresa, se
+         * recrea el dispositivo en un hilo en segundo plano ✓ (reopenVendor ✓: close+open+initialize)
+         * y devolvemos -EBUSY ✓ rapido, para que CameraService falle pronto, la app (K-73 ✓)
+         * reintente la sesion en unos segundos y la recreacion de fondo ya lo haya sanado ✓.
+         * Tope duro de recreaciones en segundo plano ✓ (3): no se enrosca el provider. */
+        static std::atomic<int> recreaciones{0};   // en segundo plano, con tope ✓
+        const int presupuestoMs = knobInt("/data/local/tmp/mocha-init-budget-ms", "MOCHA_INIT_BUDGET_MS", 6000);
+        int result = -1;
+        if (presupuestoMs > 0 && vendor && vendor->ops && vendor->ops->initialize) {
+            auto promesa = std::make_shared<std::promise<int>>();  // promise es solo-movible ✓
+            std::shared_future<int> futura = promesa->get_future();
+            camera3_device_t* v = vendor;
+            const camera3_callback_ops_t* mios = &callbacks.ops;
+            std::thread([v, mios, promesa] { promesa->set_value(v->ops->initialize(v, mios)); }).detach();
+            if (futura.wait_for(std::chrono::milliseconds(presupuestoMs)) == std::future_status::ready) {
+                result = futura.get();
+            } else {
+                openNote("K-87: el initialize del vendor SIGUE BLOQUEADO tras %d ms; recreacion en segundo plano ✓ (van %d/3)",
+                         presupuestoMs, recreaciones.load());
+                if (recreaciones.load() < 3) {
+                    recreaciones++;
+                    std::thread([this] {
+                        const int r = reopenVendor();
+                        openNote("K-87: dispositivo stock recreado en segundo plano -> %d ✓", r);
+                    }).detach();
+                }
+                result = -EBUSY;  // fallo rapido: el framework y la app (K-73) reintentan en segundos ✓
+            }
+        } else if (vendor && vendor->ops && vendor->ops->initialize) {
+            result = vendor->ops->initialize(vendor, &callbacks.ops);
+        }
         if (result) {
             clientCallbacks = nullptr;
             openNote("K-75: initialize del vendor fallo con %d", result);
+            /* mocha K-86, medido 2026-11-22 ✓.  Tras grabar y morir la app (kill ✓/remove task ✓), el
+             * dispositivo stock de NVIDIA queda en estado fatal y su initialize() devuelve -22 durante
+             * MAS DE 100 s ✓ (bancos k85_banco_v4: 24 reintentos de la K-85 y 106 s sin abrir ✓).
+             * El kernel esta limpio ✓: dmesg dice 'in use idle not busy ✓' y el timeout del CDMA es
+             * espurio ('timeout: 22 (vi.1_2) ... HW thresh 16, done 17 ✓': el trabajo ya termino ✓).
+             * Sanar el dispositivo de 2015 solo se consigue RECREANDOLO ✓, y reopenVendor() hace eso
+             * (close + open + initialize).  Reintentos acotados ✓ con perillas ✓. */
+            const int reintentos = knobInt("/data/local/tmp/mocha-init-retries", "MOCHA_INIT_RETRIES", 12);
+            const int pausaMs = knobInt("/data/local/tmp/mocha-init-delay-ms", "MOCHA_INIT_DELAY_MS", 2000);
+            for (int i = 1; i <= reintentos && vendor; i++) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(pausaMs));
+                const int r2 = reopenVendor();
+                openNote("K-86: dispositivo stock recreado, intento %d/%d -> %d ✓", i, reintentos, r2);
+                if (r2 == 0) { clientCallbacks = client; result = 0; break; }
+            }
         }
         return result;
     }
