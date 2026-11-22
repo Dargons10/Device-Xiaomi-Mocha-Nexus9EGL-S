@@ -1233,6 +1233,69 @@ index 1dd41b337b..0d6abc7581 100644
      int rc = mDevicesFactoryHal->openDevice(name, &dev);
      if (rc) {
          ALOGE("loadHwModule() error %d loading module %s", rc, name);
+diff --git a/services/camera/libcameraservice/common/Camera2ClientBase.cpp b/services/camera/libcameraservice/common/Camera2ClientBase.cpp
+index 5e086c0b44..4ce94e4899 100644
+--- a/services/camera/libcameraservice/common/Camera2ClientBase.cpp
++++ b/services/camera/libcameraservice/common/Camera2ClientBase.cpp
+@@ -19,6 +19,7 @@
+ //#define LOG_NDEBUG 0
+ 
+ #include <inttypes.h>
++#include <unistd.h>
+ 
+ #include <utils/Log.h>
+ #include <utils/Trace.h>
+@@ -40,6 +41,22 @@
+ namespace android {
+ using namespace camera2;
+ 
++/* mocha K-82, medido 2026-11-22 en 4B93A59F.  Al cerrar una grabacion de video queda trabajo
++ * pendiente en el canal VI exclusivo, y el rescate de host1x no lo limpia hasta unos segundos
++ * despues (dmesg: 'host1x: cdma_timeout_handler: timeout: 22 (vi.0_2) ✓').  Si la app de camara
++ * reabre dentro de esa ventana, la HAL de NVIDIA devuelve -EINVAL y CameraService petaba en Java:
++ *
++ *   Camera3-Device: Camera 0: initialize: Could not open camera session: Invalid argument (-22)
++ *   CameraService:  connectHelper: Could not initialize client from HAL
++ *   FATAL EXCEPTION: java.lang.IllegalArgumentException: connectHelper:1865: Illegal argument to
++ *                    HAL module for camera "0"
++ *
++ * y el unico modo de volver a la camara era reiniciar la tablet.  Se reintenta de forma acotada,
++ * con pausa, para dar tiempo al rescate del kernel.  Es acotado a proposito: si la HAL esta rota de
++ * verdad, el error se propaga igual que antes (no se buclea, no se enmascara). */
++static const int    kMochaIntentosInicializar = 3;      // como maximo ✓
++static const useconds_t kMochaPausaReintento   = 2000000; // 2 s: cubre los ~3 s del rescate medido ✓
++
+ // Interface used by CameraService
+ 
+ template <typename TClientBase>
+@@ -111,7 +128,26 @@ status_t Camera2ClientBase<TClientBase>::initializeImpl(TProviderPtr providerPtr
+         return NO_INIT;
+     }
+ 
+-    res = mDevice->initialize(providerPtr, monitorTags);
++    /* K-82: reintento acotado (ver la explicacion arriba del todo del fichero) ✓ */
++    for (int intento = 1;; intento++) {
++        res = mDevice->initialize(providerPtr, monitorTags);
++        if (res == OK) {
++            if (intento > 1) {
++                ALOGI("%s: Camera %s: initialize OK al intento %d (K-82) ✓",
++                      __FUNCTION__, TClientBase::mCameraIdStr.string(), intento);
++            }
++            break;
++        }
++        if (intento >= kMochaIntentosInicializar) {
++            ALOGE("%s: Camera %s: initialize fallo %d veces (%s, %d); se propaga el error ✓",
++                  __FUNCTION__, TClientBase::mCameraIdStr.string(), intento, strerror(-res), res);
++            break;
++        }
++        ALOGW("%s: Camera %s: initialize fallo (%s, %d); reintento %d/%d en %d ms (K-82) ✓",
++              __FUNCTION__, TClientBase::mCameraIdStr.string(), strerror(-res), res,
++              intento + 1, kMochaIntentosInicializar, kMochaPausaReintento / 1000);
++        usleep(kMochaPausaReintento);
++    }
+     if (res != OK) {
+         ALOGE("%s: Camera %s: unable to initialize device: %s (%d)",
+                 __FUNCTION__, TClientBase::mCameraIdStr.string(), strerror(-res), res);
 diff --git a/services/camera/libcameraservice/common/CameraProviderManager.cpp b/services/camera/libcameraservice/common/CameraProviderManager.cpp
 index 74405ee7b0..a4417ad6fa 100644
 --- a/services/camera/libcameraservice/common/CameraProviderManager.cpp
