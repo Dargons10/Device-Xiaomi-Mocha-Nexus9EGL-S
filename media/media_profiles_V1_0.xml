@@ -48,9 +48,9 @@
 
     <EncoderProfile quality="high" fileFormat="mp4" duration="30">
       <Video codec="h264"
-             bitRate="13000000"
-             width="1920"
-             height="1080"
+             bitRate="8000000"
+             width="1280"
+             height="720"
              frameRate="15" />
 
       <Audio codec="aac"
@@ -91,9 +91,9 @@
 
     <EncoderProfile quality="timelapsehigh" fileFormat="mp4" duration="30">
       <Video codec="h264"
-             bitRate="13000000"
-             width="1920"
-             height="1080"
+             bitRate="8000000"
+             width="1280"
+             height="720"
              frameRate="15" />
 
       <!--
@@ -133,6 +133,13 @@
          tiene su propio modo de registros mode_1920x1080 en imx179.c, asi que 1080p es nativo.  El
          techo de fotogramas sigue siendo el del modo de 8 MP que pide el PCL (12 fps reales de los
          15 anunciados), por eso se mantienen los perfiles de 720p como reserva. -->
+    <!-- 2026-11-22 (medido): 'high' se deja en 720p15, que es la configuracion probada y la que
+         funciona con la energia de la que dispone la tablet.  Los perfiles 1080p explicitos de abajo
+         se quedan para poder probarlos, pero la app resuelve 'large' contra 'high', asi que poner
+         'high' en 1080p hacia que la grabacion pidiera ~5 W continuos: con la bateria degradada
+         (1 053 000 uAh aprendidos) y el cargador topado a SDP 500 mA, la tension se hundia a
+         3,34 V en pocos segundos y la grabacion moria.  Probar 1080p exige cargador de pared real
+         de 5 V >= 2 A (que el tipo de fuente pase de SDP a DCP). -->
     <EncoderProfile quality="1080p" fileFormat="mp4" duration="30">
       <Video codec="h264"
              bitRate="13000000"
@@ -179,9 +186,9 @@
 
     <EncoderProfile quality="high" fileFormat="mp4" duration="30">
       <Video codec="h264"
-             bitRate="13000000"
-             width="1920"
-             height="1080"
+             bitRate="8000000"
+             width="1280"
+             height="720"
              frameRate="15" />
 
       <Audio codec="aac"
@@ -209,9 +216,9 @@
 
     <EncoderProfile quality="timelapsehigh" fileFormat="mp4" duration="30">
       <Video codec="h264"
-             bitRate="13000000"
-             width="1920"
-             height="1080"
+             bitRate="8000000"
+             width="1280"
+             height="720"
              frameRate="15" />
 
       <!--
